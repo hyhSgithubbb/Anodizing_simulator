@@ -1,8 +1,8 @@
-# 아노다이징 시뮬레이터 설계서 (v0.4)
+# 아노다이징 시뮬레이터 설계서 (v0.5)
 
 > 대상: 순수 Al → Al₂O₃, 순수 Ti → TiO₂ 아노다이징 공정의 **위치별·시간별 산화막 두께** 예측 (합금은 다루지 않는다)
 > 스택: Python 3.11+, PyQt6, NumPy, SciPy, PyQtGraph (+ PyOpenGL: 3D 보기)
-> 상태: **P0–P3 구현 완료** — L0(0D)·L1(경로 근사)·L2(FDM 전위장) 물리 엔진, GUI(측면도 2D·전극 끌어 놓기·전해질 전위장·회전 가능한 3D 보기·실시간 결과 그래프·위치별 두께 색칠·프로파일·히트맵), CLI, 테스트.
+> 상태: **P0–P4 구현 완료** — L0(0D)·L1(경로 근사)·L2(FDM 전위장) 물리 엔진, 프로그램 전원(다단계·펄스), 욕 열수지, Ti 간섭색, GUI(측면도 2D·전극 끌어 놓기·전해질 전위장·회전 가능한 3D 보기·실시간 결과 그래프·위치별 두께·간섭색 색칠·프로파일·히트맵·프로젝트 저장/열기·내보내기), CLI, 테스트. 남은 단계는 실측 데이터 보정(P5).
 > 아래 수치 파라미터는 **초기 추정값**이며, 실측 데이터를 받은 뒤 보정(calibration)하는 것을 전제로 한다.
 
 ### 변경 이력
@@ -11,6 +11,7 @@
 |---|---|
 | v0.1 | 수학 모델·아키텍처 초안 |
 | v0.2 | 결정 사항 반영(SciPy 추가, 측면도 기본, 3D 회전 보기, 합금 제외, 실측 보정은 데이터 확보 후). P1 구현 중 발견한 두 가지 수정: 다공성 전하 분배를 **초과 전류 기준**으로 변경(§1.5-B), 시간 적분을 **stiff 대응 선형 암시적 방식**으로 변경(§1.12) |
+| v0.5 | P4 구현: 프로그램 전원(단계 목록 + 반복, 단계 사이 램프, 단계 경계에 시간 스텝을 맞춤, §1.8), 욕 열수지(lumped, 스텝마다 정확해로 적분, 온도에 따라 κ·$j_{ss}$·용해 속도 재계산, 온도 범위 경고, §1.9), Ti 간섭색(박막 간섭 + CIE 1931 + D65 → sRGB, §1.5-A), 프로젝트 파일 `*.anod.json` 저장·열기와 CSV·PNG 내보내기(§2.10) |
 | v0.4 | P3 구현: L2 — 측면도 단면 라플라스 방정식을 비균일 직교 격자 유한체적(5점)으로 풀어 조밀한 대칭 저항 행렬 $R = B^\top K^{-1} B/(\kappa D)$ 을 만든다(§1.7). 전해질 전위장 표시, 측면도에서 전극 끌어 놓기(1 mm 단위, 끄는 동안 배치 검증). 양극–벽·바닥, 양극–음극 최소 간격 1 mm 검증 추가(§2.9) |
 | v0.3 | P2 구현: 측면도 둘레 표면 이산화, L1 경로 저항(판을 돌아가는 최단 경로, 액면 절연), 위치별 두께 h(s, t), 실시간 갱신(당겨 가기 방식)·배속, 측면도·3D 양극 두께 색칠, 프로파일·히트맵, Wagner 수. 완전히 잠긴 양극은 윗면도 젖은 면적에 넣는다(§1.7). BLAS 단일 스레드 고정(§2.7) |
 
@@ -152,7 +153,13 @@ r_f = \frac{\partial U_f}{\partial j} = \frac{\delta_b}{B\,j} \quad [\Omega\cdot
 
 - 정전류(CC): 두께가 선형으로 증가하고, 전압이 $U_f = \delta_b \ln(j/A)/B$에 따라 따라 올라간다.
 - 정전압(CV): 두께가 늘수록 전계가 약해져 전류가 지수적으로 감소한다. 두께는 $\delta_b \approx k_a U_f$로 로그적으로 수렴한다(Ti: 산성 용액에서 약 2.4–2.8 nm/V).
-- 부가 출력 (Ti): 간섭색 $2\,n\,d\cos\theta = m\,\lambda$ ($n_{TiO_2} \approx 2.2$–$2.5$)으로 예상 색상을 계산한다.
+- 부가 출력 (Ti, 구현됨 — `core/optics.py`): 막 두께로 예상 간섭색을 계산한다. 공기 / TiO₂ 막 / Ti 금속의 수직 입사 박막 간섭
+
+```math
+r = \frac{r_{01} + r_{12}\,e^{-2i\beta}}{1 + r_{01} r_{12}\,e^{-2i\beta}}, \qquad r_{ij} = \frac{N_i - N_j}{N_i + N_j}, \qquad \beta = \frac{2\pi N_1 d}{\lambda}, \qquad R(\lambda) = |r|^2
+```
+
+  으로 반사 스펙트럼을 구하고, D65 조명 아래 CIE 1931 2° 등색함수(Wyman–Sloan–Shirley 해석 근사)로 적분해 XYZ → sRGB 로 바꾼다. 막은 코시 분산 $n(\lambda) = 2.19 + 0.033/\lambda^2[\mu m^2]$ ($n_{550} \approx 2.30$, 흡수 무시), Ti 는 복소 굴절률 표(문헌값 근사, $R_{550} \approx 0.55$). 계산 결과는 Ti 아노다이징 색 순서를 그대로 따른다 — 금속 은회색(0 nm) → 금·청동(20–30 nm) → 보라(35–40 nm) → 파랑(45–60 nm) → 하늘색(70 nm) → 연노랑(100 nm) → 금색(110–130 nm) → 자홍(140 nm) → 보라(150 nm) → 파랑(170 nm) → 청록·초록(200 nm). 실제 색은 표면 거칠기·결정상·관찰 각도에 따라 달라지므로 경향을 보여주는 근사다.
 
 #### (B) 다공성형: Al₂O₃ (황산·옥살산·인산), TiO₂ 나노튜브 (EG + NH₄F)
 
@@ -305,21 +312,32 @@ Wa = \frac{\kappa\,r_f}{L} = \frac{\kappa\,\delta_b}{B\,j\,L}
 | CV | $U_{set}$, 램프 시간 $t_{ramp}$, $I_{lim}$ (제한 없음 가능) | $U_{app}(t) = U_{set}\min(1, t/t_{ramp})$, 전류 제한 시 CC로 전환 |
 | CC | $I_{set}$, $U_{lim}$ (컴플라이언스) | 전류에 램프. 전압 제한 도달 시 CV로 전환 |
 | CC→CV | $I_{set}$, $U_{set}$ | 일반 정류기 동작 (GUI 기본값). 전류에 램프 |
-| 프로그램 (P4) | 단계 리스트 [(모드, 설정값, 시간)] | 다단 승압, 펄스 아노다이징 |
+| 프로그램 (구현됨) | 단계 목록 [(모드, 전압, 전류, 시간, 램프)] + 묶음 반복 횟수 | 다단 승압, 펄스 아노다이징 (0 V 단계 = 꺼짐) |
 
 세 모드 모두 "전압 제한과 전류 제한 중 먼저 걸리는 쪽" 으로 동작한다 (§1.7). GUI 는 입력한 전류를 양극 면적으로 나눈 전류밀도(A/dm²)를 함께 보여준다.
 
-### 1.9 온도 (선택 모듈, P4)
+**프로그램 전원 (`PowerProgram`).** 각 단계는 단일 설정과 같은 의미의 (모드, 전압, 전류, 시간, 램프)다. 단계가 바뀌면 그 단계의 램프 시간 동안 (전압 제한, 전류 제한) 쌍을 직전 단계 값에서 새 값으로 선형으로 옮긴다(한쪽이 '제한 없음'이면 바로 새 값). 맨 처음 단계는 설정값(CV 는 전압, CC·CCCV 는 전류)을 0 에서 올린다 — 단일 설정의 소프트 스타트와 같다. 전압이나 전류가 0 인 단계는 출력이 꺼진다. 단계 묶음을 정해진 횟수만큼 반복한다(펄스). 단일 설정 `PowerSetting` 도 내부에서는 1단계 프로그램이다.
 
-현재는 욕 온도를 일정하게 두고, 그 온도에서 κ·$j_{ss}$·용해 속도를 계산한다. P4 에서 욕 전체 열수지(lumped)를 더한다.
+- 시간 적분은 단계 시작과 램프 끝(설정값이 꺾이거나 바뀌는 시각)을 건너뛰지 않고 그 시각에 정확히 맞춘다. 경계 시각은 새 단계에 속하므로, 계단 변화 직후의 동작점·성장 속도로 다음 스텝 크기가 정해진다(돌입 전류를 놓치지 않는다).
+- 공정 시간은 프로그램 길이 이하여야 한다(짧으면 잘라서 계산). 프리셋 전압 범위 경고는 단계 중 최고 전압으로 본다.
+- 펄스는 경계마다 스텝이 잘게 나뉘지만, 몇 번 지나면 배리어가 정상상태 가까이 머물러 펄스당 2–3 스텝이면 된다(1 s/1 s 펄스 30 min: L0 4,000 스텝 1.6 s, 허용오차를 1/16 로 줄여도 두께가 같다).
+
+### 1.9 온도 — 욕 열수지 (구현됨, 선택)
+
+기본은 욕 온도를 일정하게 두고 그 온도에서 κ·$j_{ss}$·용해 속도를 계산한다. 열수지를 켜면(`ThermalSetting`) 욕 전체를 잘 섞인 하나의 덩어리로 보고 온도를 함께 적분한다 (`core/thermal.py`).
 
 ```math
-\rho_{bath} V_{bath} c_p \frac{dT}{dt} = U_{app}\,I - (UA)_{cool}\,(T - T_{cool})
+\rho_{bath} V_{bath} c_p \frac{dT}{dt} = P - (UA)_{cool}\,(T - T_{cool}), \qquad P = (U_{app} - R_{ext} I)\,I
 ```
 
-- $\kappa(T) = \kappa_{ref}\,[1 + \alpha_\kappa (T - T_{ref})]$, $\alpha_\kappa \approx 0.01$–$0.02\ \mathrm{K^{-1}}$
-- $j_{ss}$, $v_{cd}$, $k_{pw}$에 아레니우스 의존성을 적용한다.
-- 기공 바닥 국부 발열과 burning은 v2 과제로 둔다(현재는 경고 판정만 한다).
+- $V_{bath}$: 액면 아래 전해조 부피 − 잠긴 전극 부피. $\rho$, $c_p$: 프리셋 `thermal` 항목(없으면 1.10 g/cm³, 3.6 J/(g·K)). EG 기반 나노튜브 전해질은 $c_p$ 가 작다(2.45).
+- 욕에 들어간 전기 입력 $P$ 를 모두 열로 본다. 외부 저항 $R_{ext}$(버스바·케이블)의 줄열은 욕 밖이라 뺀다. 산화물 생성 반응열(Al 은 발열 쪽, 수 % 수준)은 무시한다.
+- 냉각기·자연 방열을 $(UA)_{cool}$ 하나로 묶는다. 0 이면 단열. GUI 는 욕 부피·열용량·냉각 시정수 $C/UA$ 를 함께 보여준다.
+- 온도는 스텝마다 그 스텝의 전력을 일정하게 보고 선형 식의 정확해로 넘긴다: $T_1 = T_{eq} + (T_0 - T_{eq})\,e^{-\Delta t\,UA/C}$, $T_{eq} = T_{cool} + P/UA$ (단열이면 $T_1 = T_0 + P\Delta t/C$). 명시적 오일러는 냉각 시정수 $C/UA$ 가 스텝의 절반보다 짧으면 진동했다(UA = 10⁵ W/K 에서 정상 상승 0.0045 K 를 0.08 K 로 계산). 한 스텝의 온도 변화는 0.25 K 이하로 제한한다. 0.05 K 넘게 바뀌면 그 온도에서 전해질 물성을 다시 계산하고 성장 모델과 저항 행렬 $R = R_{unit}/\kappa(T)$ 를 바꾼다:
+  - $\kappa(T) = \kappa_{ref}\,[1 + \alpha_\kappa (T - T_{ref})]$, $\alpha_\kappa \approx 0.01$–$0.02\ \mathrm{K^{-1}}$
+  - $j_{ss}$, $v_{cd}$, $k_{pw}$, $v_{thin}$ 에 아레니우스 의존성
+- 욕 온도가 프리셋 검증 범위를 벗어나면 경고 플래그(§1.10)를 남긴다.
+- 기공 바닥 국부 발열과 burning 의 열 해석은 범위 밖이다(경고 판정만 한다).
 
 ### 1.10 한계 판정과 경고
 
@@ -331,6 +349,7 @@ Wa = \frac{\kappa\,r_f}{L} = \frac{\kappa\,\delta_b}{B\,j\,L}
 | 프리셋 범위 이탈 | 농도·온도·전압이 검증 범위 밖 | 신뢰도 낮음 표시 |
 | 음극재 호환성 | 전해질 태그와 음극재 비호환 태그가 겹침 (예: 불소계 + SUS) | 주의 표시, GUI 는 추천 음극으로 전환 |
 | 정전류 동작 | 정류기 전류 제한에 걸린 구간 | 정보 (경고 아님) |
+| 욕 온도 범위 이탈 (열수지) | 계산 중 욕 온도가 프리셋 검증 범위 밖 | 경고 — 냉각 능력 확인 |
 
 구현은 `core/limits.py` 이다. 실행 중 플래그는 한 번이라도 발생하면 결과에 남는다. 다공성막에서는 과전압이면 $j_{ss}$ 가 급증해 전해질 IR 강하가 대부분의 전압을 가져가므로, 절연파괴보다 burning 경고가 먼저 뜬다 (예: 황산 80 V).
 
@@ -466,7 +485,18 @@ Wagner 수가 작을수록 편차가 커진다(§1.7 표와 같은 경향). 막 
 
 L2 의 평균 두께는 L0 와 2 % 이내로 맞는다(L0 의 경로 저항 근사가 전체 저항을 잘 맞춘다: κ = 1 S/m 에서 L0 2.44 Ω, L2 2.46 Ω). L1 은 판 둘레 우회 경로만 보므로 전체 저항을 13 % 작게 잡아 평균이 조금 크다. 분포는 L2 가 더 크다. 판 끝으로 모이는 전류(모서리 효과)와 음극 뒷면까지 포함한 전위장을 풀기 때문이다. 나노튜브 음극 2장에서 판 끝은 가운데보다 약 20 % 두껍다(L1 은 우회 경로 차이만으로 8 %). 음극을 1장만 쓰면 L1 은 마주보는 면을 완전히 균일하게 보지만, L2 는 등진 면 쪽 전위가 모서리를 타고 넘어와 마주보는 면도 끝이 살짝 얇아진다.
 
-**자동 테스트 (pytest 115개 통과 — `core`는 Qt 없이, GUI 는 pytest-qt 로 offscreen/Xvfb 모두)**
+**P4 결과 (기본 배치, L0 — Ti 3단 승압도 L0)**
+
+| 케이스 | 조건 | 결과 |
+|---|---|---|
+| 경질 + 열수지, 단열 | CC 10 A → 60 V, 0 °C, 60 min, UA = 0 | 욕 0 → 12.1 °C (평균 394 W, 열용량 117 kJ/K), 욕 온도 범위(−10–10 °C) 이탈 경고. κ 가 커져 전압 44.6 → 35.1 V, 두께 52.9 → 52.8 μm (정전류라 전하가 두께를 정하고, 용해만 조금 빨라짐) |
+| 같은 조건, 냉각 UA 20 W/K | 냉각수 0 °C | 60 min 에 9.2 °C (냉각 시정수 98 min, 정상상태 상승 P/UA ≈ 19 K 로 가는 중) |
+| 황산 Type II 18 V CV, 단열 | 20 °C, 60 min | 욕 20 → 24.0 °C, 전류 6.27 → 8.12 A (κ·$j_{ss}$ 증가), 두께 32.4 → 36.6 μm (정전압에서는 온도가 두께를 바꾼다) |
+| 2단 승압 | 15 V 30 min → 20 V 30 min (램프 60 s) | 단계 경계·램프 끝 시각에 스텝이 정확히 맞고, 20 V 단계 전류 2.9 A/dm², 32.3 μm |
+| Ti 3단 승압 (착색) | 15 V 2 min → 30 V 3 min → 45 V 5 min | 막 두께 37 nm(자홍) → 73 nm(청록) → 112 nm(금색) — 단계마다 예상 간섭색이 바뀐다 |
+| 펄스 | 20 V / 0 V 각 1 s, 300 회 (10 min) | 1,902 스텝 0.6 s. 허용오차를 1/4·1/16 로 줄여도 두께 3.9195 μm 로 같다 |
+
+**자동 테스트 (pytest 168개 통과 — `core`는 Qt 없이, GUI 는 pytest-qt 로 offscreen/Xvfb 모두)**
 
 | # | 항목 | 상태 |
 |---|---|---|
@@ -480,9 +510,12 @@ L2 의 평균 두께는 L0 와 2 % 이내로 맞는다(L0 의 경로 저항 근�
 | 8 | Wagner 수 극한: $\kappa \to \infty$이면 균일 분포 (L1·L2, κ×10⁶ → 편차 < 10⁻⁴, κ 가 작을수록 편차 증가·Wa 감소) | ✅ |
 | + | 회로 민감도 = 유한차분, 정상상태 진동 없음(회귀), 시간 스텝 수렴, 모든 프리셋 실행, 절연파괴·burning 경고, 범위·음극 호환성 경고, 잘못된 설정 거부, CLI, GUI(기본값·금속 전환·형상 오류·실행·3D 드래그 회전) | ✅ |
 | + | L2: 격자선이 키 좌표를 지나고 전극 옆이 촘촘함, 칸 분류, 모서리 효과(1차 분포에서 L2 는 판 끝 > 1.3 × 가운데, L1 은 균일), 전위장(최대 원리·음극 0·양극 표면 평균 = $R\,I$·전극 안 투명), L0·L1 에는 전위장 없음, 캐시, 젖지 않는 요소·최소 간격 검증, L1 시험(대칭·한쪽 음극·Wagner·요소별 전하 보존·평균 ≈ L0)을 L2 로도, CLI L2, GUI(L2 전위장 켜고 끄기·시각 선택, 끌어 놓기로 입력 갱신·1 mm 맞춤·겹치면 빨간 테두리와 실행 차단, 실제 마우스 끌기, 계산 중 잠금) | ✅ |
+| + | P4 전원 프로그램: 단일 설정과 같은 동작(소프트 스타트), 단계 사이 램프·'제한 없음' 처리, 경계 시각 = 새 단계, 경계·램프 끝 목록, 반복, 검증(빈 프로그램·시간·램프·음수·전부 0·반복), 시뮬레이션이 경계에 정확히 맞음, 펄스에서 꺼진 동안 전하 0, 프로그램에서도 전하 보존 1e-9, 공정 시간 > 프로그램 거부(짧으면 자름), 최고 전압으로 범위 경고 | ✅ |
+| + | P4 열수지: 욕 부피·열용량·시정수, 단열 에너지 수지 $C\,\Delta T = \sum (U - R_{ext} I) I \Delta t$ (1e-9, 외부 저항 있음·없음), 냉각이 상승을 줄임(< P/UA), 시정수보다 오래 돌리면 $T \to T_{cool} + P/UA$ (2 %), 냉각 시정수가 스텝보다 짧아도(UA = 10⁵ W/K) 진동 없이 $P/UA$ 에 머묾, 물성이 욕 온도를 따라감(κ·R), 온도 범위 경고, 정전압 가열 → 전류 증가, 냉각 설정 검증 | ✅ |
+| + | P4 간섭색·입출력: 완전 반사체 = D65 백색, 맨 Ti = 은회색, 첫 반사 극소가 두께와 함께 장파장으로, Ti 색 순서(금색·파랑·2차 금색·보라), 프로젝트 파일 왕복(프로그램·열수지·L2·y 위치), 잘못된 파일 오류 문구(형식·버전·누락·모드·숫자·목록·JSON 행 번호), CSV(온도·단계·시각별 분포), CLI(프로젝트 저장→열기 같은 결과, 잘못된 파일 종료 코드 2, Ti 간섭색 출력), GUI(프로그램 표·펄스 반복·열수지 온도 그래프·Ti 간섭색 색칠과 되돌리기·프로젝트 저장/새로/열기와 '*' 표시·잘못된 파일 안내·열다 실패하면 입력 되돌림·CSV/PNG 내보내기) | ✅ |
 | + | L1: 요소 면적 합 = 젖은 면적(완전 잠김·액면 관통), 경로 길이(정면·우회·대각선·액면 위로 돌아가지 않음), $R \propto 1/\kappa$·대각, 요소별 전하 보존, CC 총전류, L1 평균 ≈ L0, 한쪽 음극 → 등진 면 얇음, 위치별 이력 형태, CLI 프로파일 CSV, GUI(분포 탭·색 띠·3D 색칠·형상 변경 시 색 지움·L0 에서 분포 탭 비활성), 워커 배속·스냅샷 | ✅ |
 
-**보정 (v2):** 실측 두께-시간 데이터를 읽어 $\eta$, $j_{ss}$ 파라미터, $v_{cd}$, $k_{pw}$를 최소제곱 피팅(`scipy.optimize.least_squares`)한 뒤 프리셋에 `calibrated: true`로 저장한다.
+**보정 (P5):** 실측 두께-시간 데이터를 읽어 $\eta$, $j_{ss}$ 파라미터, $v_{cd}$, $k_{pw}$를 최소제곱 피팅(`scipy.optimize.least_squares`)한 뒤 프리셋에 `calibrated: true`로 저장한다.
 
 ---
 
@@ -506,14 +539,17 @@ flowchart TB
         IP["입력 패널<br/>공정 / 전해질 / 음극 / 배치"]
         SV["SideView<br/>측면도 2D (기본)<br/>전극 끌어 놓기·전위장"]
         V3["Geometry3DView<br/>마우스 회전 3D"]
-        RV["ResultsView<br/>시계열 + 위치별 분포·히트맵"]
+        RV["ResultsView<br/>시계열(+욕 온도) + 위치별 분포·히트맵"]
+        FM["파일 메뉴<br/>프로젝트 열기·저장, 내보내기"]
     end
     subgraph CTRL["제어"]
         WK["SimulationWorker<br/>(QThread)"]
     end
     subgraph CORE["코어 엔진 (NumPy, Qt 비의존)"]
         SIM[Simulator]
-        PS[PowerSupply]
+        PS["PowerSupply<br/>단일 설정 / 다단계 프로그램"]
+        TH["thermal<br/>욕 열수지"]
+        OPT["optics<br/>Ti 간섭색"]
         CIR[CircuitSolver]
         GEO["Geometry<br/>전해조·전극"]
         FLD["field<br/>표면 요소 + 저항 행렬 R<br/>(L0 / L1 / L2 FDM)"]
@@ -524,12 +560,13 @@ flowchart TB
     subgraph DATA["데이터"]
         PR["data/*.json<br/>metals / electrolytes / cathodes"]
     end
-    CLI["cli.py<br/>GUI 없이 실행·CSV"]
+    IO["io<br/>*.anod.json · CSV"]
+    CLI["cli.py<br/>GUI 없이 실행·CSV·프로젝트"]
     IP --> MW
     MW --> SV & V3
     MW --> WK
     WK --> SIM
-    SIM --> PS & CIR & GM & LIM
+    SIM --> PS & CIR & GM & LIM & TH
     SIM --> FLD --> GEO
     MW -- "타이머: take_snapshot()" --> WK
     MW -- "add_live / 두께·전위 색칠" --> RV & SV & V3
@@ -537,6 +574,9 @@ flowchart TB
     WK -- "finished(SimulationResult)" --> RV
     PR --> PDB --> SIM
     CLI --> SIM
+    FM --> IO
+    CLI --> IO
+    MW --> OPT
 ```
 
 해석 단계는 `core.field.build_field(geometry, fidelity)` 가 만드는 표면 요소(면적 $a$)와 저항 행렬 $\mathbf{R}$ 만 바꾼다. L2 는 여기에 전위장 표시용 FDM 해(`FDMSolution`)를 함께 담는다.
@@ -554,7 +594,10 @@ Anodizing_simulator/
 ├── src/anodsim/
 │   ├── __main__.py                # python -m anodsim → GUI
 │   ├── __init__.py                # 버전, BLAS 단일 스레드 기본값 (§2.7)
-│   ├── cli.py                     # python -m anodsim.cli → 계산·시계열 CSV·위치별 프로파일 CSV
+│   ├── cli.py                     # python -m anodsim.cli → 계산·CSV·프로젝트 파일 (열수지 옵션)
+│   ├── io/                        # Qt 비의존 파일 입출력
+│   │   ├── project.py             # *.anod.json (ProcessConfig ↔ 사람이 읽는 단위의 JSON, 버전 1)
+│   │   └── export.py              # 시계열 CSV(온도·단계 포함), 위치별 분포 CSV
 │   ├── core/                      # ── Qt 비의존 물리 엔진 ──
 │   │   ├── constants.py           # F, R_g
 │   │   ├── units.py               # μm↔m, A/dm²↔A/m², °C↔K
@@ -572,7 +615,9 @@ Anodizing_simulator/
 │   │   │   ├── base.py            # GrowthModel (패러데이, 전하 분배 규칙)
 │   │   │   ├── compact.py         # 치밀형
 │   │   │   └── porous.py          # 다공성형 (초과 전류 분배, 용해)
-│   │   ├── power_supply.py        # CV / CC / CC→CV + 램프
+│   │   ├── power_supply.py        # CV / CC / CC→CV + 램프, PowerProgram (다단계·펄스, 경계 시각)
+│   │   ├── thermal.py             # ThermalSetting, BathThermal (욕 열수지)
+│   │   ├── optics.py              # Ti 간섭색 (박막 간섭 + CIE 1931 + D65 → sRGB)
 │   │   ├── circuit.py             # Newton 동작점 해석 + 배리어 민감도
 │   │   ├── limits.py              # 절연파괴·burning·용해 한계, 범위·음극 경고
 │   │   ├── presets.py             # PresetDB (JSON → SI)
@@ -584,16 +629,16 @@ Anodizing_simulator/
 │       ├── main_window.py         # 입력 도크 + [측면도|3D] + 결과
 │       ├── worker.py              # SimulationWorker (QThread, 배속, 최신 스냅샷 당겨 가기, 중지)
 │       ├── style.py               # 색상 (색각 이상 검증된 시리즈 순서)
-│       ├── panels/                # process / electrolyte / cathode / geometry (끌어 놓은 위치 반영)
+│       ├── panels/                # process(+프로그램 편집기·열수지·예상 간섭색) / electrolyte / cathode / geometry
 │       └── views/
 │           ├── side_view.py       # 측면도 (x–z): 전극 끌어 놓기(PlateHandle), 극간 거리, 두께 색 띠, 전위장
 │           ├── view3d.py          # GLViewWidget 3D, 시점 프리셋, 투영 라벨, 양극 표면 두께 색칠
 │           ├── colormap.py        # 두께(viridis)·편차(CET-D1)·전위(주황 단색) 색상표, 범례
 │           └── results_view.py    # [시간 이력 | 위치별 분포] 탭, 실시간 갱신, 십자선 판독, 경고
-└── tests/                         # pytest 115개 (core 104 + GUI 11)
+└── tests/                         # pytest 168개 (core·io·CLI 149 + GUI 19)
 ```
 
-이후 추가 예정(P4): `core/thermal.py`, `io/`(프로젝트 저장·내보내기), Ti 간섭색.
+이후(P5): 실측 데이터 보정 도구.
 
 ### 2.4 핵심 데이터 모델 (구현)
 
@@ -604,6 +649,22 @@ class PowerSetting:
     voltage: float             # V — CV/CCCV 설정값, CC 에서는 제한값
     current: float             # A — CC/CCCV 설정값, CV 에서는 제한값 (math.inf = 제한 없음)
     ramp_time: float = 0.0     # s — CV 는 전압, CC·CCCV 는 전류에 램프
+
+@dataclass(frozen=True)
+class PowerStep:               # 프로그램의 한 단계 (의미는 PowerSetting 과 같다)
+    mode: PowerMode; voltage: float; current: float
+    duration: float            # s
+    ramp_time: float = 0.0     # s — 직전 단계 제한값 → 이 단계 제한값 선형 변화
+
+@dataclass(frozen=True)
+class PowerProgram:
+    steps: tuple[PowerStep, ...]
+    repeat: int = 1            # 단계 묶음 반복 (펄스)
+
+@dataclass(frozen=True)
+class ThermalSetting:          # core/thermal.py
+    cooling_ua: float          # W/K (0 = 단열)
+    coolant_temperature: float # K
 
 @dataclass(frozen=True)
 class PlateElectrode:          # y–z 평면에 평행한 판, ±x 면이 마주본다
@@ -621,14 +682,15 @@ class ProcessConfig:
     metal: str                             # "Al" | "Ti"
     electrolyte: ElectrolyteRecipe         # preset_id + 농도
     cathode_material: str
-    power: PowerSetting
+    power: PowerSetting | PowerProgram
     geometry: Geometry
-    bath_temperature: float                # K
-    duration: float                        # s
+    bath_temperature: float                # K — 초기 욕 온도
+    duration: float                        # s — 프로그램이면 프로그램 길이 이하
     fidelity: str = "L0"                   # "L0" | "L1" | "L2" (GUI·CLI 기본값은 L1)
     elements: int = 120                    # L1·L2 표면 요소 수 (목표값, 2–400)
     offset_voltage: float = 0.0            # V
     external_resistance: float = 0.0       # Ω
+    thermal: ThermalSetting | None = None  # None = 욕 온도 일정
 
 @dataclass(frozen=True)
 class SurfaceMesh:                         # core/field/mesh.py — 측면도 둘레 요소 (길이 N)
@@ -640,17 +702,20 @@ class SurfaceMesh:                         # core/field/mesh.py — 측면도 �
 class SimState:                            # 요소별 배열 (L0: 길이 1)
     time: float
     barrier: np.ndarray; porous: np.ndarray; metal_loss: np.ndarray; charge: np.ndarray
+    temperature: float                     # 욕 온도 [K]
 
 @dataclass(frozen=True)
 class Snapshot:                            # GUI 로 넘기는 불변 사본
     time: float; voltage: float; current: float; control: str; cathode_overpotential: float
     current_density, film_voltage, barrier, porous, total, metal_loss, charge: np.ndarray
     flags: frozenset[str]
+    temperature: float; step: int          # 욕 온도 [K], 전원 프로그램 단계 번호
 
 @dataclass(frozen=True)
 class SimulationResult:                    # 스칼라 시계열(면적 가중 평균, 두께 최소/최대) + 위치별 이력
     time, voltage, current, current_density, film_voltage, barrier, porous, total,
-    total_min, total_max, charge: np.ndarray
+    total_min, total_max, charge, temperature, step: np.ndarray
+    thermal: bool                          # 열수지를 계산했는가
     mesh: SurfaceMesh
     profile_time: np.ndarray               # (K,) — 약 400 개 시각
     profile_total, profile_current_density: np.ndarray   # (K, N)
@@ -717,6 +782,32 @@ class SimulationWorker(QObject):                          # gui/worker.py
     def request_stop(self): ...
 ```
 
+```python
+class PowerSupply:                                        # core/power_supply.py
+    def __init__(self, setting: PowerSetting | PowerProgram, duration=None): ...
+    def setpoint(self, t) -> Setpoint: ...                # (전압 제한, 전류 제한)
+    def step_index(self, t) -> int: ...
+    def next_breakpoint(self, t) -> float | None: ...     # 단계 시작·램프 끝 — 시간 스텝을 여기에 맞춘다
+    def active_ramp(self, t) -> float: ...
+
+@dataclass(frozen=True)
+class BathThermal:                                        # core/thermal.py
+    heat_capacity: float; setting: ThermalSetting
+    @classmethod
+    def from_config(cls, geometry, preset, setting): ...  # ρ c_p (액면 아래 부피 − 잠긴 전극)
+    def rate(self, temperature, power) -> float: ...      # dT/dt (스텝 크기 제한용)
+    def advance(self, temperature, power, dt) -> float: ...  # 전력 일정 → 정확해 (강한 냉각에서도 안정)
+    time_constant: float                                  # C/UA
+
+def interference_color(thickness) -> np.ndarray: ...      # core/optics.py — 막 두께 [m] → sRGB (N, 3)
+def color_name(rgb) -> str: ...                           # 대략적인 한국어 색 이름
+
+def save_project(path, config) -> Path: ...               # io/project.py — *.anod.json
+def load_project(path) -> ProcessConfig: ...              # 잘못된 파일은 ProjectError (한국어 문구)
+def write_timeseries_csv(path, result): ...               # io/export.py
+def write_profile_csv(path, result, index=None): ...
+```
+
 회로 해석기·시간 적분기는 처음부터 일반 $N\times N$ 을 풀도록 만들어 두었기 때문에, L2 의 조밀한 $\mathbf{R}$ 은 그대로 들어갔다. 바뀐 곳은 Wagner 수의 전해질 저항 항뿐이다($R_{ii}a_i$ → $(\mathbf{R}\,\mathbf{a})_i$, 대각이면 같다).
 
 ### 2.6 실행 흐름
@@ -741,7 +832,7 @@ sequenceDiagram
     and GUI 스레드
         loop 타이머마다
             MW->>W: take_snapshot(), progress
-            MW->>MW: 시계열·프로파일·히트맵 갱신, 측면도·3D 두께 색칠, (L2) 전해질 전위장
+            MW->>MW: 시계열(+욕 온도)·프로파일·히트맵 갱신, 측면도·3D 두께(또는 Ti 간섭색) 색칠, (L2) 전해질 전위장
         end
     end
     U-->>W: 중지 (선택) → 지금까지의 결과 반환
@@ -761,6 +852,14 @@ sequenceDiagram
 
 ### 2.8 GUI 레이아웃 (현재)
 
+![GUI — Ti 착색 3단 승압 프로그램: 프로그램 표, 예상 간섭색, 측면도의 간섭색 띠, 판독 줄의 색 견본](images/gui_ti_program.png)
+
+(Ti 묽은 황산, 15 → 30 → 45 V, 음극 1장 — 전도도가 높아 막이 균일하므로 양극 전체가 같은 금색(112 nm)이다. 판독 줄에 '단계 3/3'과 간섭색 견본.)
+
+![GUI — 경질 아노다이징 + 열수지: 욕 온도 그래프가 추가되고 판독 줄에 욕 온도](images/gui_thermal.png)
+
+(Al 경질, CC 10 A → 60 V, 0 °C, 냉각 UA 20 W/K — 1 h 동안 욕이 9 °C 까지 오르고 전도도가 커져 전압이 44.6 → 37.4 V 로 내려간다.)
+
 ![GUI — L2 결과: 측면도의 전해질 전위장과 양극 두께 색 띠, 위치별 분포](images/gui_l2_potential.png)
 
 (TiO₂ 나노튜브, 60 V, 음극 2장, L2 — 전위는 양극 근처에서 가장 높고 음극 쪽으로 0 이 된다. 판 끝으로 전류가 모여 h(s) 가 U 자 모양이다.)
@@ -774,12 +873,17 @@ sequenceDiagram
 (TiO₂ 나노튜브, 60 V, 음극 1장 — 음극을 마주보는 −x 면이 두껍고 등진 +x 면의 가운데가 가장 얇다.)
 
 ```text
+파일 메뉴: 새 프로젝트 · 열기… · 저장 · 다른 이름으로 저장… · 내보내기(시간 이력 CSV, 위치별 분포 CSV, 결과 그래프·측면도·3D PNG)
 ┌─ 공정 조건 (도크) ─┬─[측면도 (2D)]─[3D 보기]────────┬─ 결과 ─────────────────────────────┐
-│ [공정|전해질|음극|배치] │                             │ 판독: t · U · U_f · I · j · h(최소–최대) · δ_b · 편차 · Wa │
+│ [공정|전해질|음극|배치] │ [색칠: 두께|Ti 간섭색] [☑ 전위]  │ 판독: t · U · U_f · I · j · h(최소–최대) · δ_b · 욕 온도 · 단계 · 간섭색 · 편차 · Wa │
 │  금속 Al/Ti        │   측면도: 전해조·액면·전극,      │ [시간 이력 | 위치별 분포]            │
-│  전원 모드·V·I     │   행거, 극간 거리,               │  시간 이력: U·U_f / j / h(평균+범위) / δ_b │
+│  전원 모드·V·I     │   행거, 극간 거리,               │  시간 이력: U·U_f / j / h(평균+범위) / [욕 온도] / δ_b │
+│  (프로그램: 단계 표 │                                 │                                     │
+│   + 반복 횟수)     │                                 │                                     │
 │  램프·시간·온도    │   양극 둘레 두께 색 띠 + 범례     │  위치별 분포: h(s), j(s) (면 경계·면 이름), │
-│  해석 단계 L0/L1/L2│   [☑ 전해질 전위] 전위장(L2)     │            히트맵 h(s, t) 또는 평균 대비 편차 │
+│  해석 단계 L0/L1/L2│   전위장(L2)                     │            히트맵 h(s, t) 또는 평균 대비 편차 │
+│  예상 간섭색 (Ti)  │                                 │                                     │
+│  [☐ 열수지] UA·냉각수│                                 │                                     │
 │                    │   전극을 끌어 놓아 배치 변경      │                                     │
 │                    │   3D: 양극 표면 두께 색칠,       │                                     │
 │ 입력 오류·주의     │   왼쪽 드래그 회전, 오른쪽 이동,  │                                     │
@@ -793,7 +897,12 @@ sequenceDiagram
 |---|---|---|
 | SideView (+ SideViewPanel 도구 줄) | `pg.PlotWidget`, 비율 고정, 전극 = `pg.ROI` 상속 `PlateHandle`(채움 + 이동 전용), 면마다 `ImageItem` 색 띠, 전위장 `ImageItem` | 기본 보기. 측면도 좌표(x 가로, z 높이). 색 띠는 면마다 이미지 한 장이라 실시간 갱신이 가볍다 (점 산포도는 프레임당 13 ms 라 교체). 전위장은 전해질 채움 위·전극과 글자 아래 층 |
 | Geometry3DView | `gl.GLViewWidget` 상속 `OrbitView`, `GLMeshItem`(전극·전해질·두께 색칠 표면), `GLLinePlotItem`(전해조·축) | 라벨은 3D 점을 화면에 투영한 `QLabel`. 두께 표면은 요소마다 사각형(−x/+x 요소는 y 끝면 절반 포함)이고 면 색만 바꿔 갱신한다. 반투명 전해질보다 먼저 그린다 |
-| ResultsView | 시간 이력: `pg.PlotWidget` × 4 (시간축 연동, `FillBetweenItem` 범위 띠), 위치별 분포: 프로파일 × 2 + `ImageItem` 히트맵 + `ColorBarItem` | 축 하나에 단위 하나 (이중 축 없음). 시간 이력 위에 마우스를 올리면 그 시각의 프로파일과 측면도·3D 색이 따라간다. 계산 중에는 시간축을 공정 시간 전체로 고정 |
+| ResultsView | 시간 이력: `pg.PlotWidget` × 4–5 (시간축 연동, `FillBetweenItem` 범위 띠, 열수지면 욕 온도 그래프), 위치별 분포: 프로파일 × 2 + `ImageItem` 히트맵 + `ColorBarItem` | 축 하나에 단위 하나 (이중 축 없음). 시간 이력 위에 마우스를 올리면 그 시각의 프로파일과 측면도·3D 색이 따라간다. 계산 중에는 시간축을 공정 시간 전체로 고정. 판독 줄에 욕 온도·프로그램 단계·Ti 간섭색 견본 |
+| ProcessPanel + ProgramEditor | 전원 모드에 '프로그램' 추가 → `QTableWidget` 단계 표(칸마다 콤보·스핀박스) + 반복 횟수, 열수지 `QGroupBox`(체크), 예상 간섭색 | 프로그램을 처음 고르면 지금 단일 설정이 첫 단계가 된다. 공정 시간은 프로그램 길이로 고정. 냉각수 온도는 직접 고치기 전까지 욕 온도를 따라간다 |
+
+**Ti 간섭색 보기:** Ti 치밀막 결과에서는 측면도 도구 줄의 '색칠'이 'Ti 간섭색'으로 바뀌어, 측면도 색 띠와 3D 양극 표면을 요소별 막 두께의 예상 간섭색(RGB)으로 칠한다(범례는 최소–최대 두께 사이의 간섭색). '두께 색상표'로 되돌릴 수 있다. 공정 탭에는 계산 전에 '최고 전압에서 막 두께 ≈ $\delta_{native} + k_a U$' 의 예상 색이 보인다.
+
+**프로젝트 파일:** '파일' 메뉴에서 지금 입력을 `*.anod.json` 으로 저장하고 다시 연다. 제목 줄에 파일 이름이 나오고, 저장한 뒤 입력을 고치면 앞에 '*' 가 붙는다. 화면에 칸이 없는 값(요소 수, 오프셋 전압, 외부 저항, 전극의 깊이 위치)도 파일 값을 그대로 지킨다. 열 때는 금속 → 전해질 → 음극 → 공정 → 배치 순서로 넣어, 프리셋을 고를 때 자동으로 바뀌는 기본값(욕 온도·전압·추천 음극)이 파일 값을 덮지 않게 한다. 넣는 도중 실패하면(이 금속에서 쓸 수 없는 전해질, 음극 3장 이상 등) 입력을 열기 전 상태로 되돌리고 이유를 알린다.
 
 색: 두께는 순차 색상표 viridis(색 범위 = 그 시각의 최소–최대), 평균 대비 편차는 0 을 가운데로 하는 발산 색상표 CET-D1 이다. 전해질 전위는 두께와 같은 화면에 함께 나오므로 다른 색조의 단색 순차 램프(주황, OKLCH 명도 0.96 → 0.40, 색 범위 0 – 그 시각의 최대)를 쓴다. 모든 색칠에는 값이 적힌 범례가 붙는다.
 
@@ -804,13 +913,15 @@ sequenceDiagram
 ### 2.9 입력 검증
 
 - `ProcessConfig.validate()` 와 `Geometry.validate()` 가 물리적 범위(양수, 전해조 이탈, 전극 겹침, 잠김 여부, 음극 최소 1개, 금속–전해질 일치)를 점검한다. 오류가 있으면 실행 버튼이 꺼지고 도크 아래에 빨간 '오류'로 표시된다.
+- v0.5 추가: 전원 프로그램(단계가 하나 이상, 시간 > 0, 0 ≤ 램프 ≤ 단계 시간, 전압·전류 ≥ 0, 모두 0 이 아님, 반복 ≥ 1, 공정 시간 ≤ 프로그램 길이), 열수지(UA ≥ 0, 냉각수 온도가 물리적 범위).
 - v0.4 추가: 양극은 전해조 벽·바닥과 1 mm 이상 떨어져야 한다(닿은 면은 젖지 않는데, 표면 요소는 젖은 면 기준이라 L2 에서 요소가 고립된다). 양극과 각 음극은 **측면도 단면에서** 1 mm 이상 떨어져야 한다 — 깊이(y) 위치가 달라도 2D 해석에서는 닿은 것과 같기 때문이다. 음극끼리는 3D 상자 겹침만 본다.
 - `limits.range_warnings()` 는 프리셋 검증 범위(온도·농도·전압) 이탈, 음극재 호환성, 미보정 상태를 '주의'로 알린다 (실행은 가능).
 
 ### 2.10 파일 입출력
 
-- 현재: CLI `--csv` 로 시간 이력 CSV(평균·최소·최대 두께 포함), `--profile-csv` 로 최종 위치별 분포 CSV(s, 면, x, z, 면적, 두께, 배리어, 기공층, 전류밀도) 저장.
-- P4: 프로젝트 파일(`*.anod.json`: `ProcessConfig` + 프리셋 override), GUI 내보내기(시계열·프로파일 CSV, PNG).
+- **프로젝트 파일 `*.anod.json`** (`io/project.py`, 형식 버전 1): `ProcessConfig` 전체(전원 프로그램·열수지·배치·해석 단계 포함)를 단위를 키 이름에 붙인 JSON 으로 저장한다(cm, mm, °C, min, s, V, A, W/K, '제한 없음' = null). 읽을 때 누락·형식 오류는 어느 항목이 문제인지 한국어로 알린다(JSON 문법 오류는 행 번호). GUI '파일' 메뉴와 CLI `--project`/`--save-project` 가 같은 코드를 쓴다.
+- **내보내기** (`io/export.py`): 시간 이력 CSV(평균·최소·최대 두께, 욕 온도, 전원 단계), 위치별 분포 CSV(s, 면, x, z, 면적, 두께, 배리어, 기공층, 전류밀도; 최종 또는 기록된 임의 시각), GUI 그림 PNG(결과 그래프·측면도·3D).
+- 프리셋 파라미터를 프로젝트별로 덮어쓰는 기능은 보정 단계(P5)에서 함께 정한다.
 
 ### 2.11 의존성
 
@@ -826,7 +937,7 @@ sequenceDiagram
 ### 2.12 테스트 전략
 
 - `core`: 순수 pytest. §1.13 의 물리 검증 케이스를 회귀 테스트로 고정했다.
-- `gui`: pytest-qt 로 기본값, 금속 전환 시 프리셋·음극 필터링, 형상 오류 시 실행 차단, 실행 종단 간(L1 분포 탭·색 띠·3D 색칠, L0 에서 분포 탭 비활성, L2 전위장), 측면도 전극 끌어 놓기(ROI API 와 실제 마우스 이벤트 둘 다, 겹침 표시, 계산 중 잠금), 워커 배속·스냅샷, 3D 드래그 회전을 확인한다. 디스플레이가 없으면 Qt offscreen 플랫폼으로 실행된다(`tests/conftest.py`).
+- `gui`: pytest-qt 로 기본값, 금속 전환 시 프리셋·음극 필터링, 형상 오류 시 실행 차단, 실행 종단 간(L1 분포 탭·색 띠·3D 색칠, L0 에서 분포 탭 비활성, L2 전위장), 측면도 전극 끌어 놓기(ROI API 와 실제 마우스 이벤트 둘 다, 겹침 표시, 계산 중 잠금), 워커 배속·스냅샷, 3D 드래그 회전, 전원 프로그램 표·펄스, 열수지 온도 그래프, Ti 간섭색 색칠, 프로젝트 저장·열기·새로, 내보내기를 확인한다. 파일 대화상자는 메서드(`_ask_open_path`, `_ask_save_path`)로 두어 테스트에서 바꿔 끼운다. `window` 고정물은 `tests/conftest.py` 에 있다. 디스플레이가 없으면 Qt offscreen 플랫폼으로 실행된다(`tests/conftest.py`).
 
 ### 2.13 개발 로드맵
 
@@ -836,8 +947,8 @@ sequenceDiagram
 | **P1** L0 엔진 | 패러데이, 고전계, 치밀/다공성 모델, 전원 모드, IMEX 적분, CLI, 측면도·3D 보기·결과 그래프 | ✅ 완료 (§1.13 테스트 1–6) |
 | **P2** L1 + 실시간 | 표면 이산화, 경로 저항 행렬, 위치별 두께 h(s, t), 실시간 스냅샷·배속, 3D 양극 표면 두께 색칠, 프로파일·히트맵 | ✅ 완료 (§1.13 테스트 5, 8) |
 | **P3** L2 + 배치 편집 | FDM 라플라스 + SciPy 희소 LU, 측면도에서 전극 드래그 배치, 전위장 표시 | ✅ 완료 (§1.13 테스트 7) |
-| **P4** 확장 | 열수지, 프로그램 전원, Ti 간섭색, 프로젝트 저장·내보내기 | 다음 단계 |
-| **P5** 보정 | 실측 두께-시간 데이터 피팅 도구, `calibrated` 프리셋 | 실측 데이터 확보 후 |
+| **P4** 확장 | 열수지, 프로그램 전원, Ti 간섭색, 프로젝트 저장·내보내기 | ✅ 완료 (§1.8, §1.9, §1.5-A, §2.10) |
+| **P5** 보정 | 실측 두께-시간 데이터 피팅 도구, `calibrated` 프리셋, 프로젝트별 프리셋 덮어쓰기 | 다음 단계 — 실측 데이터 확보 후 |
 
 ### 2.14 결정 사항 (v0.2 확정)
 

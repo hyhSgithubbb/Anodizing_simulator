@@ -15,22 +15,9 @@ from PyQt6.QtWidgets import QApplication
 
 from anodsim.core.power_supply import PowerMode
 from anodsim.core.simulator import Simulator
-from anodsim.gui.app import configure_pyqtgraph
-from anodsim.gui.main_window import MainWindow
 from anodsim.gui.worker import SimulationWorker
 
 from conftest import make_config
-
-
-@pytest.fixture
-def window(qtbot):
-    configure_pyqtgraph()
-    w = MainWindow()
-    qtbot.addWidget(w)
-    w.resize(1400, 900)
-    w.show()
-    qtbot.waitExposed(w)
-    return w
 
 
 def test_window_starts_with_valid_defaults(window):

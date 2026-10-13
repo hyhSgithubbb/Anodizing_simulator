@@ -11,7 +11,11 @@
 - 기공층은 회로에 영향을 주지 않으므로 새 배리어에서 푼 동작점이 곧 새 상태의 동작점이다
   (스텝당 회로 해석 1회).
 
-스텝 크기는 배리어 두께 상대 변화(0.5 %), 전류 상대 변화(5 %), 램프 해상도로 제한한다.
+스텝 크기는 배리어 두께 상대 변화(0.5 %), 전류 상대 변화(5 %), 램프 해상도, 욕 온도 변화(0.25 K)로 제한하고,
+전원 프로그램의 단계 경계·램프 끝(설정값이 꺾이거나 바뀌는 시각)을 건너뛰지 않도록 그 시각에 정확히 맞춘다.
+
+열수지(config.thermal)가 있으면 욕 온도를 스텝마다 (전력 일정으로 본 정확해로) 적분하고, 온도가 0.05 K 넘게 바뀔 때마다
+전해질 물성(κ → R, j_ss, 용해 속도)과 성장 모델을 그 온도에서 다시 만든다.
 
 모든 계산은 양극 표면 요소에 대한 길이 N 배열이다. 해석 단계(L0: N = 1, L1: 측면도 둘레 N 요소)는
 `core.field` 가 만드는 요소 면적과 저항 행렬 R 만 바꾼다.
@@ -31,9 +35,12 @@ from .growth import GrowthRates, make_growth_model
 from .power_supply import PowerSupply
 from .presets import PresetDB
 from .state import ProcessConfig, SimState, Snapshot
+from .thermal import BathThermal
 
 MIN_STEP = 1e-9  # s
 PROFILE_SAMPLES = 400   # 위치별 이력 h(s, t) 를 기록하는 최대 시각 수 (대략)
+PROPERTY_UPDATE = 0.05  # K — 욕 온도가 이만큼 바뀌면 전해질 물성을 다시 계산한다
+MAX_TEMPERATURE_STEP = 0.25  # K — 한 스텝의 최대 온도 변화
 
 
 class ConfigError(ValueError):
@@ -63,6 +70,8 @@ class SimulationResult:
     total_min: np.ndarray               # m
     total_max: np.ndarray               # m
     charge: np.ndarray                  # C/m²
+    temperature: np.ndarray             # K — 욕 온도 (열수지가 없으면 일정)
+    step: np.ndarray                    # 전원 프로그램 단계 번호
     final: Snapshot
     flags: frozenset[str]
     warnings: tuple[str, ...]
@@ -72,6 +81,7 @@ class SimulationResult:
     profile_total: np.ndarray           # m, (K, N)
     profile_current_density: np.ndarray  # A/m², (K, N)
     wagner: float                       # 최종 시각의 면적 가중 Wagner 수 (전류 0 이면 nan)
+    thermal: bool = False               # 열수지를 계산했는가
 
     @property
     def uniformity(self) -> float:
@@ -83,7 +93,8 @@ class SimulationResult:
 
 class _History:
     _FIELDS = ("time", "voltage", "current", "control", "current_density", "film_voltage",
-               "cathode_overpotential", "barrier", "porous", "total", "total_min", "total_max", "charge")
+               "cathode_overpotential", "barrier", "porous", "total", "total_min", "total_max", "charge",
+               "temperature", "step")
 
     def __init__(self, areas: np.ndarray, duration: float):
         self.weights = areas / areas.sum()
@@ -110,15 +121,18 @@ class _History:
         r["total_min"].append(float(s.total.min()))
         r["total_max"].append(float(s.total.max()))
         r["charge"].append(float(w @ s.charge))
+        r["temperature"].append(s.temperature)
+        r["step"].append(s.step)
 
     def result(self, final: Snapshot, flags, warnings, steps: int, mesh: SurfaceMesh,
-               wagner: float) -> SimulationResult:
+               wagner: float, thermal: bool) -> SimulationResult:
         if self.profile["time"][-1] != final.time:   # 마지막 시각은 항상 기록
             self.add_profile(final)
-        arrays = {k: np.asarray(v, dtype=float) for k, v in self.rows.items() if k != "control"}
+        arrays = {k: np.asarray(v, dtype=float) for k, v in self.rows.items() if k not in ("control", "step")}
+        arrays["step"] = np.asarray(self.rows["step"], dtype=int)
         p = self.profile
         return SimulationResult(control=tuple(self.rows["control"]), final=final, flags=frozenset(flags),
-                                warnings=tuple(warnings), steps=steps, mesh=mesh, wagner=wagner,
+                                warnings=tuple(warnings), steps=steps, mesh=mesh, wagner=wagner, thermal=thermal,
                                 profile_time=np.asarray(p["time"], dtype=float),
                                 profile_total=np.vstack(p["total"]),
                                 profile_current_density=np.vstack(p["current_density"]), **arrays)
@@ -143,7 +157,7 @@ class Simulator:
         self.cathode = presets.cathode(config.cathode_material)
         self.props = self.preset.properties(config.bath_temperature, config.electrolyte.concentration)
         self.model = make_growth_model(self.metal, self.props)
-        self.supply = PowerSupply(config.power)
+        self.supply = PowerSupply(config.power, config.duration)
 
         geo = config.geometry
         try:
@@ -155,6 +169,7 @@ class Simulator:
         self.resistance = self.field.resistance(self.props.conductivity)  # Ω, (N, N)
         self.circuit = CircuitSolver(self.areas, self.resistance, self.cathode, geo.cathode_area,
                                      config.offset_voltage, config.external_resistance)
+        self.thermal = None if config.thermal is None else BathThermal.from_config(geo, self.preset, config.thermal)
         self.warnings = tuple(limits.range_warnings(config, self.preset, self.cathode))
         self.max_step = max_step if max_step is not None else min(config.duration / 1000.0, 10.0)
         self.barrier_tolerance = barrier_tolerance
@@ -164,9 +179,11 @@ class Simulator:
     # ── 상태 ────────────────────────────────────────────────────────────────
     def reset(self) -> None:
         n = self.areas.size
+        t0 = self.config.bath_temperature
         self.state = SimState(time=0.0,
                               barrier=np.full(n, self.metal.native_oxide_thickness),
-                              porous=np.zeros(n), metal_loss=np.zeros(n), charge=np.zeros(n))
+                              porous=np.zeros(n), metal_loss=np.zeros(n), charge=np.zeros(n), temperature=t0)
+        self._update_properties(t0)
         self.steps = 0
         self.flags_seen: set[str] = set()
         s = self.state
@@ -184,6 +201,7 @@ class Simulator:
             current_density=op.current_density.copy(), film_voltage=op.film_voltage.copy(),
             barrier=s.barrier.copy(), porous=s.porous.copy(), total=s.total.copy(),
             metal_loss=s.metal_loss.copy(), charge=s.charge.copy(), flags=self._flags,
+            temperature=s.temperature, step=self.supply.step_index(s.time),
         )
 
     # ── 적분 ────────────────────────────────────────────────────────────────
@@ -192,10 +210,7 @@ class Simulator:
             return self.snapshot()
         s, op0, r0 = self.state, self._op, self._rates
         dj, d_uf = self.circuit.barrier_sensitivity(self.model, s.barrier, op0)
-        dt = self._step_size(s, r0, op0, dj)
-        t1 = s.time + dt
-        if self.config.duration - t1 < MIN_STEP:
-            t1 = self.config.duration
+        dt, t1 = self._step_size(s, r0, op0, dj)
 
         # 1) 배리어: 선형 암시적 오일러
         m = self.model
@@ -208,16 +223,22 @@ class Simulator:
         j_lin = np.maximum(op0.current_density + dj @ (barrier1 - s.barrier), 0.0)
         barrier_rate = (barrier1 - s.barrier) / dt
         pores = m.pore_formation(m.formation_rate(j_lin), barrier_rate)
+        temperature = s.temperature
+        if self.thermal is not None:   # 3) 욕 온도: 스텝 동안 전력 일정 → 선형 ODE 의 정확해
+            temperature = self.thermal.advance(s.temperature, self._bath_power(op0), dt)
         self.state = SimState(
             time=t1,
             barrier=barrier1,
             porous=np.maximum(s.porous + dt * m.porous_rate(pores, s.porous), 0.0),
             metal_loss=s.metal_loss + dt * m.metal_rate(j_lin),
             charge=s.charge + dt * j_lin,
+            temperature=temperature,
         )
+        if abs(temperature - self._props_temperature) > PROPERTY_UPDATE:
+            self._update_properties(temperature)
 
-        # 3) 새 상태의 동작점 (기공층은 회로에 영향 없음)
-        op1 = self.circuit.solve(m, barrier1, self.supply.setpoint(t1), op0.log_j, op0.control)
+        # 4) 새 상태의 동작점 (기공층은 회로에 영향 없음)
+        op1 = self.circuit.solve(self.model, barrier1, self.supply.setpoint(t1), op0.log_j, op0.control)
         self.steps += 1
         self._set_operating_point(op1)
         return self.snapshot()
@@ -232,7 +253,7 @@ class Simulator:
             if callback is not None and callback(snap) is False:
                 break
         return history.result(self.snapshot(), self.flags_seen, self.warnings, self.steps, self.mesh,
-                              self.wagner_number())
+                              self.wagner_number(), self.thermal is not None)
 
     def wagner_number(self) -> float:
         """면적 가중 Wagner 수 Wa = (dU_f/dj) / (R·a)_i — 막 분극 저항 / 전해질 저항.
@@ -249,14 +270,29 @@ class Simulator:
         return float(self.areas @ (polarization / electrolyte) / self.areas.sum())
 
     # ── 내부 ────────────────────────────────────────────────────────────────
+    def _update_properties(self, temperature: float) -> None:
+        """욕 온도에서 전해질 물성·성장 모델·저항 행렬을 다시 만든다."""
+        self._props_temperature = temperature
+        self.props = self.preset.properties(temperature, self.config.electrolyte.concentration)
+        self.model = make_growth_model(self.metal, self.props)
+        self.resistance = self.field.resistance(self.props.conductivity)
+        self.circuit.resistance = self.resistance
+
+    def _bath_power(self, op) -> float:
+        """욕을 데우는 전력 [W]: 정류기 출력 U·I 에서 욕 밖 외부 저항(버스바·케이블)의 줄열을 뺀다."""
+        return op.current * (op.voltage - self.config.external_resistance * op.current)
+
     def _set_operating_point(self, op) -> None:
         s = self.state
         self._op = op
         self._rates = self.model.rates(op.current_density, op.film_voltage, s.barrier, s.porous)
         self._flags = limits.check(op, self.props, s.porous, self._rates)
+        if self.thermal is not None:
+            self._flags |= limits.temperature_flags(s.temperature, self.preset)
         self.flags_seen |= self._flags
 
-    def _step_size(self, s: SimState, r: GrowthRates, op, dj: np.ndarray) -> float:
+    def _step_size(self, s: SimState, r: GrowthRates, op, dj: np.ndarray) -> tuple[float, float]:
+        """(Δt, 스텝 끝 시각). 끝 시각은 공정 끝·전원 프로그램 경계에 정확히 맞춘다."""
         dt = self.max_step
         rate = np.abs(r.barrier)
         active = rate > 0.0
@@ -270,8 +306,20 @@ class Simulator:
             dt = min(dt, self.current_tolerance * float(np.min(j[flowing] / dj_dt[flowing])))
         if self.props.pore_wall_dissolution > 0.0:
             dt = min(dt, 0.05 / self.props.pore_wall_dissolution)
-        ramp = self.config.power.ramp_time
-        if s.time < ramp:
-            dt = min(dt, ramp / 100.0, ramp - s.time)   # 램프 끝(꺾이는 점)을 건너뛰지 않는다
+        ramp = self.supply.active_ramp(s.time)
+        if ramp > 0.0:
+            dt = min(dt, ramp / 100.0)
+        if self.thermal is not None:
+            heating = abs(self.thermal.rate(s.temperature, self._bath_power(op)))
+            if heating > 0.0:
+                dt = min(dt, MAX_TEMPERATURE_STEP / heating)
         dt = max(dt, MIN_STEP)
-        return min(dt, self.config.duration - s.time)
+        # 설정값이 꺾이거나 바뀌는 시각(단계 경계·램프 끝)과 공정 끝을 건너뛰지 않는다
+        end = self.config.duration
+        breakpoint_ = self.supply.next_breakpoint(s.time)
+        if breakpoint_ is not None:
+            end = min(end, breakpoint_)
+        t1 = s.time + dt
+        if t1 >= end - MIN_STEP:
+            t1 = end
+        return t1 - s.time, t1

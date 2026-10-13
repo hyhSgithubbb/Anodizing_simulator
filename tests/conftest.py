@@ -41,3 +41,18 @@ def ideal_presets(db: PresetDB, preset_id: str, **changes) -> PresetDB:
                                                   barrier_thinning=0.0))
     modified = replace(preset, **changes)
     return PresetDB(db.metals, {**db.electrolytes, preset_id: modified}, db.cathodes)
+
+
+@pytest.fixture
+def window(qtbot):
+    """GUI 메인 창 (pytest-qt). GUI 테스트 파일들이 함께 쓴다."""
+    from anodsim.gui.app import configure_pyqtgraph
+    from anodsim.gui.main_window import MainWindow
+
+    configure_pyqtgraph()
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w.resize(1400, 900)
+    w.show()
+    qtbot.waitExposed(w)
+    return w

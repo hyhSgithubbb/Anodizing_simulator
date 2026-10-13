@@ -5,25 +5,29 @@
     python -m anodsim.cli --metal Al --electrolyte al_sulfuric_typeII --mode CCCV --voltage 15 --current 5 --minutes 60
     python -m anodsim.cli --metal Ti --electrolyte ti_color_acid --mode CV --voltage 50 --minutes 10 --csv ti.csv
     python -m anodsim.cli --metal Ti --electrolyte ti_nanotube_eg --mode CV --voltage 60 --profile-csv profile.csv
+    python -m anodsim.cli --project 경질.anod.json --csv out.csv        # 저장해 둔 프로젝트 (다단계 전원 포함)
+    python -m anodsim.cli --metal Al --mode CCCV --voltage 60 --current 10 --cooling 20 --save-project a.anod.json
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import math
 import sys
 
 import numpy as np
 
+from .core import optics
 from .core import units as u
-from .core.field import DEFAULT_ELEMENTS, FACE_NAMES, FIDELITY_LEVELS, LUMPED
+from .core.field import DEFAULT_ELEMENTS, FIDELITY_LEVELS
 from .core.geometry import Geometry
 from .core.limits import FLAG_MESSAGES, WARNING_FLAGS
 from .core.power_supply import PowerMode, PowerSetting
 from .core.presets import PresetDB
 from .core.simulator import ConfigError, Simulator
 from .core.state import ElectrolyteRecipe, ProcessConfig
+from .core.thermal import ThermalSetting
+from .io import ProjectError, load_project, save_project, write_profile_csv, write_timeseries_csv
 
 DEFAULT_ELECTROLYTE = {"Al": "al_sulfuric_typeII", "Ti": "ti_color_acid"}
 
@@ -45,6 +49,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="해석 단계: L0 = 양극 평균(0D), L1 = 위치별 두께 경로 근사 (기본), L2 = 위치별 두께 FDM 전위장")
     p.add_argument("--elements", type=int, default=DEFAULT_ELEMENTS, help="L1·L2 표면 요소 수 (목표값)")
     p.add_argument("--one-cathode", action="store_true", help="기본 배치에서 음극을 왼쪽 1장만 쓴다")
+    p.add_argument("--cooling", type=float, metavar="W_PER_K",
+                   help="욕 열수지 계산: 냉각 능력 UA [W/K] (0 = 단열). 생략하면 욕 온도 일정")
+    p.add_argument("--coolant", type=float, metavar="C", help="냉각수 온도 [°C] (기본: 욕 온도)")
+    p.add_argument("--project", help="프로젝트 파일(*.anod.json)에서 공정 설정을 읽는다 (다른 공정 옵션은 무시)")
+    p.add_argument("--save-project", help="공정 설정을 프로젝트 파일로 저장할 경로")
     p.add_argument("--csv", help="시간 이력을 CSV 로 저장할 경로")
     p.add_argument("--profile-csv", help="최종 위치별 분포(요소별 두께·전류밀도)를 CSV 로 저장할 경로")
     return p
@@ -76,6 +85,10 @@ def config_from_args(args, db: PresetDB) -> ProcessConfig:
     geometry = Geometry.default()
     if args.one_cathode:
         geometry = Geometry(geometry.tank, geometry.anode, geometry.cathodes[:1])
+    thermal = None
+    if args.cooling is not None:
+        coolant = args.coolant if args.coolant is not None else t_c
+        thermal = ThermalSetting(args.cooling, u.celsius_to_kelvin(coolant))
     return ProcessConfig(
         metal=args.metal,
         electrolyte=ElectrolyteRecipe(preset.id, args.concentration),
@@ -86,36 +99,8 @@ def config_from_args(args, db: PresetDB) -> ProcessConfig:
         duration=args.minutes * u.MINUTE,
         fidelity=args.fidelity,
         elements=args.elements,
+        thermal=thermal,
     )
-
-
-def write_csv(path: str, result) -> None:
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["time_min", "voltage_V", "current_A", "control", "current_density_A_dm2",
-                    "film_voltage_V", "barrier_nm", "porous_um", "total_um", "total_min_um", "total_max_um",
-                    "charge_C_cm2"])
-        for k in range(result.time.size):
-            w.writerow([f"{result.time[k] / u.MINUTE:.6g}", f"{result.voltage[k]:.6g}", f"{result.current[k]:.6g}",
-                        result.control[k], f"{result.current_density[k] / u.A_PER_DM2:.6g}",
-                        f"{result.film_voltage[k]:.6g}", f"{result.barrier[k] / u.NM:.6g}",
-                        f"{result.porous[k] / u.UM:.6g}", f"{result.total[k] / u.UM:.6g}",
-                        f"{result.total_min[k] / u.UM:.6g}", f"{result.total_max[k] / u.UM:.6g}",
-                        f"{result.charge[k] / u.A_PER_CM2:.6g}"])
-
-
-def write_profile_csv(path: str, result) -> None:
-    """최종 시각의 요소별 값 (s: 측면도 단면 둘레 좌표)."""
-    m, f = result.mesh, result.final
-    with open(path, "w", newline="", encoding="utf-8") as fh:
-        w = csv.writer(fh)
-        w.writerow(["s_cm", "face", "x_cm", "z_cm", "area_cm2", "total_um", "barrier_nm", "porous_um",
-                    "current_density_A_dm2"])
-        for i in range(m.size):
-            face = "전체" if m.face[i] == LUMPED else FACE_NAMES[m.face[i]]
-            w.writerow([f"{m.s[i] / u.CM:.5g}", face, f"{m.x[i] / u.CM:.5g}", f"{m.z[i] / u.CM:.5g}",
-                        f"{m.area[i] / u.CM ** 2:.5g}", f"{f.total[i] / u.UM:.6g}", f"{f.barrier[i] / u.NM:.6g}",
-                        f"{f.porous[i] / u.UM:.6g}", f"{f.current_density[i] / u.A_PER_DM2:.6g}"])
 
 
 def print_result(sim: Simulator, result) -> None:
@@ -125,11 +110,14 @@ def print_result(sim: Simulator, result) -> None:
     if sim.field.fdm is not None:
         fdm = sim.field.fdm
         print(f"FDM 격자 {fdm.x.size} × {fdm.z.size} (미지수 {fdm.unknown.size}개), 등가 깊이 {fdm.depth / u.CM:.2f} cm")
+    # 시작 욕 온도 기준 (열수지가 있으면 계산 중 κ 와 R 이 바뀐다)
+    kappa = sim.preset.conductivity(cfg.bath_temperature, cfg.electrolyte.concentration)
     ones = np.ones(sim.mesh.size)
-    r_total = 1.0 / float(ones @ np.linalg.solve(sim.resistance, ones))   # 양극 전체가 등전위일 때의 저항
+    resistance = sim.field.resistance(kappa)
+    r_total = 1.0 / float(ones @ np.linalg.solve(resistance, ones))   # 양극 전체가 등전위일 때의 저항
     r_text = f"{r_total:.3g} Ω" if r_total >= 1.0 else f"{r_total * 1e3:.3g} mΩ"
     print(f"양극 면적 {sim.areas.sum() / u.CM ** 2:.1f} cm², 전해질 저항 {r_text}, "
-          f"κ = {sim.props.conductivity:.3g} S/m, 욕 온도 {u.kelvin_to_celsius(cfg.bath_temperature):.1f} °C")
+          f"κ = {kappa:.3g} S/m, 욕 온도 {u.kelvin_to_celsius(cfg.bath_temperature):.1f} °C")
     print(f"{'t [min]':>8} {'U [V]':>8} {'I [A]':>8} {'j [A/dm²]':>10} {'U_f [V]':>8} "
           f"{'δ_b [nm]':>9} {'h_p [μm]':>9} {'h [μm]':>9}  제어")
     for t_target in np.linspace(0.0, cfg.duration, 11):
@@ -144,6 +132,14 @@ def print_result(sim: Simulator, result) -> None:
               f"최대 {f.total.max() / u.UM:.3f} μm, 편차 (최대−최소)/평균 {result.uniformity * 100:.2f} %")
     if np.isfinite(result.wagner):
         print(f"Wagner 수 Wa = {result.wagner:.3g} (≫1 균일, ≪1 배치에 민감)")
+    if result.thermal:
+        t0, t1 = (u.kelvin_to_celsius(result.temperature[k]) for k in (0, -1))
+        print(f"욕 온도 {t0:.1f} → {t1:.1f} °C (최고 {u.kelvin_to_celsius(result.temperature.max()):.1f} °C, "
+              f"욕 열용량 {sim.thermal.heat_capacity / 1e3:.0f} kJ/K)")
+    if sim.metal.symbol == "Ti" and sim.props.regime == "compact":
+        thickness = result.total[-1]   # 면적 가중 평균
+        rgb = optics.interference_color(thickness)[0]
+        print(f"예상 간섭색: {optics.color_name(rgb)} ({optics.to_hex(rgb)}, 막 두께 {thickness / u.NM:.0f} nm)")
     for w in result.warnings:
         print(f"[주의] {w}")
     for flag in WARNING_FLAGS:
@@ -158,7 +154,14 @@ def main(argv=None) -> int:
         list_presets(db)
         return 0
     try:
-        sim = Simulator(config_from_args(args, db), db)
+        config = load_project(args.project) if args.project else config_from_args(args, db)
+    except (OSError, ProjectError) as e:
+        print(f"[프로젝트 오류] {e}", file=sys.stderr)
+        return 2
+    if args.save_project:
+        print(f"프로젝트 저장: {save_project(args.save_project, config)}")
+    try:
+        sim = Simulator(config, db)
     except ConfigError as e:
         for err in e.errors:
             print(f"[설정 오류] {err}", file=sys.stderr)
@@ -166,7 +169,7 @@ def main(argv=None) -> int:
     result = sim.run()
     print_result(sim, result)
     if args.csv:
-        write_csv(args.csv, result)
+        write_timeseries_csv(args.csv, result)
         print(f"CSV 저장: {args.csv}")
     if args.profile_csv:
         write_profile_csv(args.profile_csv, result)

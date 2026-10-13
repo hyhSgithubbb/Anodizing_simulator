@@ -13,7 +13,7 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QPainter, QPen
-from PyQt6.QtWidgets import QCheckBox, QGraphicsRectItem, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QCheckBox, QComboBox, QGraphicsRectItem, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from ...core import units as u
 from ...core.geometry import Geometry, PlateElectrode
@@ -154,10 +154,11 @@ class SideView(pg.PlotWidget):
         self._fit()
 
     # ── 두께 색 띠 ──────────────────────────────────────────────────────────
-    def set_profile(self, mesh, values, vmin: float, vmax: float, label: str) -> None:
+    def set_profile(self, mesh, values, vmin: float, vmax: float, label: str, rgb=None, legend_colors=None) -> None:
         """양극 둘레 바깥에 요소별 값(두께)을 색 띠로 표시한다 (요소 2개 이상일 때).
 
         면마다 이미지 한 장(1 × 요소 수)이라 실시간 갱신에도 가볍다.
+        rgb (N, 3, 0–1) 를 주면 색상표 대신 그 색(예: Ti 간섭색)으로 칠하고, 범례는 legend_colors 로 그린다.
         """
         if mesh.size < 2:
             self.clear_profile()
@@ -165,9 +166,14 @@ class SideView(pg.PlotWidget):
         if self._strip_mesh is not mesh:
             self._build_strips(mesh)
         values = np.asarray(values, dtype=float)
+        if rgb is not None:
+            pixels = np.clip(np.round(np.asarray(rgb) * 255.0), 0, 255).astype(np.uint8)
         for item, index in self._strips:
-            item.setImage(values[index], levels=(vmin, vmax), lut=self._lut, autoLevels=False)
-        self.legend.set_range(vmin, vmax, label)
+            if rgb is None:
+                item.setImage(values[index], levels=(vmin, vmax), lut=self._lut, autoLevels=False)
+            else:
+                item.setImage(pixels[index], levels=(0, 255), lut=None, autoLevels=False)
+        self.legend.set_range(vmin, vmax, label, colors=legend_colors)
         self._place_legends()
 
     def clear_profile(self) -> None:
@@ -344,11 +350,16 @@ class SideView(pg.PlotWidget):
 
 
 class SideViewPanel(QWidget):
-    """측면도 + 위쪽 도구 줄 (전위장 표시 선택, 끌어 옮기기 안내)."""
+    """측면도 + 위쪽 도구 줄 (색칠 기준, 전위장 표시 선택, 끌어 옮기기 안내)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.view = SideView()
+        self.colour_mode = QComboBox()
+        self.colour_mode.addItem("두께 색상표", "thickness")
+        self.colour_mode.addItem("Ti 간섭색", "interference")
+        self.colour_mode.setEnabled(False)
+        self.colour_mode.setToolTip("Ti 치밀막(착색 아노다이징) 결과는 막 두께에 따른 예상 간섭색으로 칠할 수 있습니다.")
         self.show_potential = QCheckBox("전해질 전위 표시")
         self.show_potential.setChecked(True)
         self.show_potential.setEnabled(False)
@@ -357,6 +368,9 @@ class SideViewPanel(QWidget):
         hint.setStyleSheet(f"color: {style.INK_SECONDARY};")
         bar = QHBoxLayout()
         bar.setContentsMargins(6, 4, 6, 0)
+        bar.addWidget(QLabel("색칠"))
+        bar.addWidget(self.colour_mode)
+        bar.addSpacing(12)
         bar.addWidget(self.show_potential)
         bar.addStretch(1)
         bar.addWidget(hint)
@@ -364,3 +378,8 @@ class SideViewPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(bar)
         layout.addWidget(self.view, 1)
+
+    @property
+    def interference(self) -> bool:
+        """측면도·3D 양극을 Ti 간섭색으로 칠할지."""
+        return self.colour_mode.isEnabled() and self.colour_mode.currentData() == "interference"

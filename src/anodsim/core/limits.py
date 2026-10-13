@@ -10,16 +10,18 @@ BREAKDOWN = "breakdown"
 BURNING = "burning"
 DISSOLUTION_LIMITED = "dissolution_limited"
 CURRENT_LIMITED = "current_limited"
+TEMPERATURE_RANGE = "temperature_range"
 
 FLAG_MESSAGES = {
     BREAKDOWN: "막 전압이 절연파괴 전압을 넘었습니다. 스파크(PEO) 영역은 모델 적용 범위 밖입니다.",
     BURNING: "전류밀도가 burning 한계를 넘었습니다 (국부 과열·피막 손상 위험).",
     DISSOLUTION_LIMITED: "용해 속도가 성장 속도 이상입니다. 한계 두께에 도달했습니다.",
     CURRENT_LIMITED: "정류기 전류 제한(정전류)으로 동작한 구간이 있습니다.",
+    TEMPERATURE_RANGE: "욕 온도가 프리셋 검증 범위를 벗어났습니다 (열수지 결과 — 냉각 능력을 확인하세요).",
 }
 
 # 사용자에게 경고로 보여줄 플래그 (CURRENT_LIMITED 는 정보성)
-WARNING_FLAGS = (BREAKDOWN, BURNING, DISSOLUTION_LIMITED)
+WARNING_FLAGS = (BREAKDOWN, BURNING, DISSOLUTION_LIMITED, TEMPERATURE_RANGE)
 
 
 def check(op, props, porous, rates) -> frozenset[str]:
@@ -35,6 +37,11 @@ def check(op, props, porous, rates) -> frozenset[str]:
     return frozenset(flags)
 
 
+def temperature_flags(temperature: float, preset) -> frozenset[str]:
+    """열수지로 변한 욕 온도가 프리셋 검증 범위를 벗어났는지."""
+    return frozenset() if preset.temperature_range.contains(temperature) else frozenset({TEMPERATURE_RANGE})
+
+
 def range_warnings(config, preset, cathode) -> list[str]:
     """프리셋의 검증 범위를 벗어난 입력, 음극재 호환성 경고."""
     warnings = []
@@ -48,9 +55,10 @@ def range_warnings(config, preset, cathode) -> list[str]:
         r = preset.concentration_range
         warnings.append(f"{preset.species} 농도 {conc:g} {preset.concentration_unit} 가 프리셋 범위"
                         f"({r.low:g}–{r.high:g} {preset.concentration_unit})를 벗어났습니다.")
-    if not preset.voltage_range.contains(config.power.voltage):
+    voltage = config.power.max_voltage   # 프로그램이면 단계 중 최고 전압
+    if not preset.voltage_range.contains(voltage):
         r = preset.voltage_range
-        warnings.append(f"전압 {config.power.voltage:g} V 가 프리셋 범위({r.low:g}–{r.high:g} V)를 벗어났습니다.")
+        warnings.append(f"전압 {voltage:g} V 가 프리셋 범위({r.low:g}–{r.high:g} V)를 벗어났습니다.")
     if not cathode.is_compatible(preset.tags):
         warnings.append(f"음극재 '{cathode.name}'은(는) 이 전해질에 적합하지 않습니다: {cathode.note}")
     if not preset.calibrated:

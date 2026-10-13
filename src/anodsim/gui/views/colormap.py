@@ -36,11 +36,15 @@ def colors(values, vmin: float, vmax: float) -> np.ndarray:
     return np.asarray(THICKNESS_CMAP.map(t, mode="float"), dtype=float)
 
 
-def _gradient_css(cmap) -> str:
-    stops = []
-    for t in np.linspace(0.0, 1.0, 9):
-        r, g, b, _ = cmap.map(float(t), mode="byte")
-        stops.append(f"stop:{t:.3f} rgb({r},{g},{b})")
+def _gradient_css(cmap=None, colors=None) -> str:
+    """가로 그라디언트 CSS. colors (hex 목록)를 주면 색상표 대신 그 색들을 고르게 놓는다."""
+    if colors is None:
+        colors = []
+        for t in np.linspace(0.0, 1.0, 9):
+            r, g, b = cmap.map(float(t), mode="byte")[:3]
+            colors.append(f"#{r:02x}{g:02x}{b:02x}")
+    positions = np.linspace(0.0, 1.0, len(colors))
+    stops = [f"stop:{t:.3f} {c}" for t, c in zip(positions, colors, strict=True)]
     return f"qlineargradient(x1:0, y1:0, x2:1, y2:0, {', '.join(stops)})"
 
 
@@ -55,7 +59,9 @@ class ColorLegend(QFrame):
         self.title = QLabel(title)
         self.bar = QFrame()
         self.bar.setFixedHeight(10)
-        self.bar.setStyleSheet(f"background: {_gradient_css(cmap)}; border: none; border-radius: 2px;")
+        self._cmap = cmap
+        self._custom = False
+        self._set_bar(_gradient_css(cmap))
         self.low = QLabel()
         self.high = QLabel()
         for label in (self.title, self.low, self.high):
@@ -74,7 +80,17 @@ class ColorLegend(QFrame):
         self.setFixedWidth(190)
         self.hide()
 
-    def set_range(self, vmin: float, vmax: float, label: str | None = None) -> None:
+    def _set_bar(self, css: str) -> None:
+        self.bar.setStyleSheet(f"background: {css}; border: none; border-radius: 2px;")
+
+    def set_range(self, vmin: float, vmax: float, label: str | None = None, colors=None) -> None:
+        """colors: 색상표 대신 쓸 색 목록 (예: 두께별 간섭색). None 이면 원래 색상표."""
+        if colors is not None:
+            self._set_bar(_gradient_css(colors=list(colors)))
+            self._custom = True
+        elif self._custom:
+            self._set_bar(_gradient_css(self._cmap))
+            self._custom = False
         digits = 4 if vmax - vmin < 0.01 * max(abs(vmax), 1e-30) else 3
         self.low.setText(f"{vmin:.{digits}g}")
         self.high.setText(f"{vmax:.{digits}g}")

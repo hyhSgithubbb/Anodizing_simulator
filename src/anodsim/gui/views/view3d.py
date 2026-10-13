@@ -101,6 +101,7 @@ if gl is not None:
         def set_labels(self, labels) -> None:
             """labels: [(텍스트, (x, y, z), 색)]"""
             for label, _ in self._labels:
+                label.hide()          # deleteLater 는 이벤트 루프로 돌아가야 처리되므로 먼저 숨긴다
                 label.deleteLater()
             self._labels = []
             for text, pos, color in labels:
@@ -194,16 +195,23 @@ class Geometry3DView(QWidget):
         if first:
             self.set_view(*VIEW_PRESETS[0][1:])
 
-    def set_profile(self, mesh, values, vmin: float, vmax: float, label: str) -> None:
-        """양극 표면을 요소별 값(두께)으로 색칠한다. 같은 요소 구성이면 색만 바꾼다 (실시간 갱신)."""
+    def set_profile(self, mesh, values, vmin: float, vmax: float, label: str, rgb=None, legend_colors=None) -> None:
+        """양극 표면을 요소별 값(두께)으로 색칠한다. 같은 요소 구성이면 색만 바꾼다 (실시간 갱신).
+
+        rgb (N, 3, 0–1) 를 주면 색상표 대신 그 색(예: Ti 간섭색)으로 칠한다.
+        """
         if self.view is None or self._geometry is None or mesh.size < 2:
             return
         if self._surface is None or self._surface_size != mesh.size:
             self._build_surface(mesh)
-        face_colors = np.repeat(colors(values, vmin, vmax)[self._surface_owner], 2, axis=0)  # 사각형 = 삼각형 2개
+        if rgb is None:
+            element_colors = colors(values, vmin, vmax)
+        else:
+            element_colors = np.column_stack([np.asarray(rgb, dtype=float), np.ones(mesh.size)])
+        face_colors = np.repeat(element_colors[self._surface_owner], 2, axis=0)  # 사각형 = 삼각형 2개
         self._surface_data.setFaceColors(face_colors)
         self._surface.meshDataChanged()
-        self.legend.set_range(vmin, vmax, label)
+        self.legend.set_range(vmin, vmax, label, colors=legend_colors)
         self._place_legend()
 
     def clear_profile(self) -> None:

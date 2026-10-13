@@ -1,6 +1,7 @@
 """결과 그래프.
 
-- '시간 이력' 탭: 전압, 전류밀도, 산화막 두께(평균 + 위치별 최소–최대 범위), 배리어층 두께 (시간축 연동 + 십자선 판독)
+- '시간 이력' 탭: 전압, 전류밀도, 산화막 두께(평균 + 위치별 최소–최대 범위), [욕 온도 — 열수지를 계산했을 때],
+  배리어층 두께 (시간축 연동 + 십자선 판독). Ti 치밀막은 판독 줄에 예상 간섭색을 함께 보인다.
 - '위치별 분포' 탭 (L1): 둘레 위치 s 에 따른 두께 h(s)·전류밀도 j(s), 히트맵 h(s, t)
 
 계산 중에는 워커가 보내는 스냅샷으로 실시간 갱신하고(add_live), 끝나면 전체 결과로 다시 그린다(show_result).
@@ -8,11 +9,14 @@
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QTabWidget, QVBoxLayout, QWidget
 
+from ...core import optics
 from ...core import units as u
 from ...core.field import FACE_NAMES
 from ...core.limits import FLAG_MESSAGES, WARNING_FLAGS
@@ -20,6 +24,7 @@ from .. import style
 from .colormap import DEVIATION_CMAP, THICKNESS_CMAP
 
 CONTROL_LABELS = {"CV": "정전압", "CC": "정전류", "OFF": "출력 없음"}
+_TAG_OR_SPACE = re.compile(r"(<[^>]*>)| ")
 HEATMAP_COLUMNS = 400   # 히트맵 시간 방향 해상도
 HEATMAP_ROWS = 240      # 히트맵 위치 방향 해상도
 
@@ -217,6 +222,13 @@ def _resample(times, profiles, mesh, t_end):
     return grid[:, si].T
 
 
+def _colour_swatch(thickness: float) -> str:
+    """판독 줄용 간섭색 견본 (색 사각형 + 이름). 공백은 _set_readout 이 줄바꿈 금지 공백으로 바꾼다."""
+    rgb = optics.interference_color(thickness)[0]
+    return (f"<span style='color:{optics.to_hex(rgb)}; font-size:14pt'>■</span>"
+            f" 간섭색 {optics.color_name(rgb)}")
+
+
 class ResultsView(QWidget):
     time_selected = pyqtSignal(float)   # 판독 시각 [s] (마우스를 올린 위치, 최종이면 끝 시각)
 
@@ -228,6 +240,9 @@ class ResultsView(QWidget):
         self._regime = "porous"
         self._t_min = None
         self._selected = None   # 위치별 분포를 보여줄 이력 인덱스 (None = 최신)
+        self._thermal = False
+        self._interference = False   # Ti 치밀막: 판독 줄에 예상 간섭색
+        self._step_count = 1         # 전원 프로그램 단계 수 (반복 포함), 1 이면 표시하지 않음
 
         self.readout = QLabel("‘계산 실행’을 누르면 시간에 따른 전압·전류·두께가 여기에 표시됩니다.")
         self.readout.setTextFormat(Qt.TextFormat.RichText)
@@ -241,8 +256,10 @@ class ResultsView(QWidget):
         self.voltage = _Plot("전압", "전압 [V]", show_time_axis=False)
         self.current = _Plot("전류밀도 j (양극 평균)", "j [A/dm²]", show_time_axis=False)
         self.thickness = _Plot("산화막 두께", "두께 [μm]", show_time_axis=False)
+        self.temperature = _Plot("욕 온도 (열수지)", "온도 [°C]", show_time_axis=False)
+        self.temperature.setVisible(False)
         self.barrier = _Plot("배리어층 두께 δ_b", "δ_b [nm]", show_time_axis=True)
-        self.plots = (self.voltage, self.current, self.thickness, self.barrier)
+        self.plots = (self.voltage, self.current, self.thickness, self.temperature, self.barrier)
         for p in self.plots[1:]:
             p.setXLink(self.voltage)
         history = QWidget()
@@ -311,16 +328,19 @@ class ResultsView(QWidget):
         self.heatmap.cursor.setVisible(False)
         self.notices.setVisible(False)
 
-    def start_live(self, mesh, regime: str, duration: float) -> None:
+    def start_live(self, mesh, regime: str, duration: float, thermal: bool = False, interference: bool = False,
+                   step_count: int = 1) -> None:
         """계산 시작: 실시간 갱신용 버퍼와 그래프 구성을 준비한다."""
         self.clear()
         self._regime = regime
+        self._set_options(thermal, interference, step_count)
         self._set_mesh(mesh)
         self._live = {k: [] for k in ("time", "voltage", "film_voltage", "current", "current_density", "total",
-                                      "total_min", "total_max", "barrier", "control", "profile_total",
-                                      "profile_current_density")}
+                                      "total_min", "total_max", "barrier", "temperature", "control", "step",
+                                      "profile_total", "profile_current_density")}
         self._setup_series(np.zeros(0), {k: np.zeros(0) for k in ("voltage", "film_voltage", "current_density",
-                                                                   "total", "total_min", "total_max", "barrier")})
+                                                                   "total", "total_min", "total_max", "barrier",
+                                                                   "temperature")})
         # 계산 중에는 시간축을 공정 시간 전체로 고정한다 (축을 매번 다시 그리지 않아 가볍고, 진행 정도도 보인다)
         for p in self.plots:
             p.enableAutoRange(axis="x", enable=False)
@@ -341,13 +361,15 @@ class ResultsView(QWidget):
         live["total_min"].append(float(snap.total.min()))
         live["total_max"].append(float(snap.total.max()))
         live["barrier"].append(float(w @ snap.barrier))
+        live["temperature"].append(snap.temperature)
         live["control"].append(snap.control)
+        live["step"].append(snap.step)
         live["profile_total"].append(snap.total)
         live["profile_current_density"].append(snap.current_density)
 
         t = np.asarray(live["time"]) / u.MINUTE
         a = {k: np.asarray(live[k]) for k in ("voltage", "film_voltage", "current_density", "total",
-                                              "total_min", "total_max", "barrier")}
+                                              "total_min", "total_max", "barrier", "temperature")}
         self.voltage.update_series(t, [a["voltage"], a["film_voltage"]])
         self.current.update_series(t, [a["current_density"] / u.A_PER_DM2])
         if self._distributed:
@@ -355,23 +377,27 @@ class ResultsView(QWidget):
         else:
             self.thickness.update_series(t, [a["total"] / u.UM])
         self.barrier.update_series(t, [a["barrier"] / u.NM])
+        if self._thermal:
+            self.temperature.update_series(t, [u.kelvin_to_celsius(a["temperature"])])
         if self._distributed and self.tabs.currentIndex() == 1:   # 보이지 않는 탭은 탭을 열 때 그린다
             self._show_profile(snap.time, snap.total, snap.current_density)
             self._draw_heatmap()
         self._show_live_readout(snap)
 
-    def show_result(self, result, regime: str, stopped: bool = False) -> None:
+    def show_result(self, result, regime: str, stopped: bool = False, interference: bool = False,
+                    step_count: int = 1) -> None:
         self._result = result
         self._live = None
         self._regime = regime
         self._selected = None
+        self._set_options(result.thermal, interference, step_count)
         self._set_mesh(result.mesh)
         t = result.time / u.MINUTE
         self._t_min = t
         self._setup_series(t, {"voltage": result.voltage, "film_voltage": result.film_voltage,
                                "current_density": result.current_density, "total": result.total,
                                "total_min": result.total_min, "total_max": result.total_max,
-                               "barrier": result.barrier})
+                               "barrier": result.barrier, "temperature": result.temperature})
         if self._distributed:
             f = result.final
             self._show_profile(f.time, f.total, f.current_density)
@@ -387,6 +413,12 @@ class ResultsView(QWidget):
         self._draw_heatmap()
 
     # ── 내부: 구성 ──────────────────────────────────────────────────────────
+    def _set_options(self, thermal: bool, interference: bool, step_count: int) -> None:
+        self._thermal = thermal
+        self._interference = interference
+        self._step_count = step_count
+        self.temperature.setVisible(thermal)
+
     @property
     def _distributed(self) -> bool:
         return self._mesh is not None and self._mesh.size > 1
@@ -420,6 +452,10 @@ class ResultsView(QWidget):
             self.thickness.set_series(t, [("h", a["total"] / u.UM)])
         self.thickness.setTitle(title, color=style.INK, size="10pt")
         self.barrier.set_series(t, [("δ_b", a["barrier"] / u.NM)])
+        if self._thermal:
+            self.temperature.set_series(t, [("T", u.kelvin_to_celsius(a["temperature"]))])
+        else:
+            self.temperature.set_series([], [])
 
     # ── 내부: 위치별 분포 ───────────────────────────────────────────────────
     def _history(self):
@@ -508,7 +544,13 @@ class ResultsView(QWidget):
         if self._distributed:
             parts.append(f"({r.total_min[k] / u.UM:.3g}–{r.total_max[k] / u.UM:.3g})")
         parts.append(f"δ_b = {r.barrier[k] / u.NM:.1f} nm")
+        if self._thermal:
+            parts.append(f"욕 {u.kelvin_to_celsius(r.temperature[k]):.1f} °C")
+        if self._step_count > 1:
+            parts.append(f"단계 {int(r.step[k]) + 1}/{self._step_count}")
         parts.append(CONTROL_LABELS.get(r.control[k], r.control[k]))
+        if self._interference:
+            parts.append(_colour_swatch(r.total[k]))
         if final and self._distributed:
             parts.append(f"편차 {r.uniformity * 100:.2f} %")
         if final and np.isfinite(r.wagner):
@@ -522,12 +564,18 @@ class ResultsView(QWidget):
                  f"h = {live['total'][-1] / u.UM:.3g} μm"]
         if self._distributed:
             parts.append(f"({live['total_min'][-1] / u.UM:.3g}–{live['total_max'][-1] / u.UM:.3g})")
+        if self._thermal:
+            parts.append(f"욕 {u.kelvin_to_celsius(snap.temperature):.1f} °C")
+        if self._step_count > 1:
+            parts.append(f"단계 {snap.step + 1}/{self._step_count}")
         parts.append(CONTROL_LABELS.get(snap.control, snap.control))
+        if self._interference:
+            parts.append(_colour_swatch(live["total"][-1]))
         self._set_readout(parts)
 
     def _set_readout(self, parts) -> None:
-        # 값과 단위가 줄바꿈으로 갈라지지 않도록 항목 안의 공백은 줄바꿈 금지 공백으로
-        self.readout.setText(" │ ".join(p.replace(" ", "&nbsp;") for p in parts))
+        # 값과 단위가 줄바꿈으로 갈라지지 않도록 항목 안의 공백은 줄바꿈 금지 공백으로 (HTML 태그 안은 그대로)
+        self.readout.setText(" │ ".join(_TAG_OR_SPACE.sub(lambda m: m.group(1) or "&nbsp;", p) for p in parts))
 
     def _show_notices(self, result, stopped: bool) -> None:
         lines = []

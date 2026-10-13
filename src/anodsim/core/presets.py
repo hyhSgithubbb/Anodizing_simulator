@@ -126,7 +126,17 @@ def parse_electrolyte(d: dict) -> ElectrolytePreset:
         breakdown_voltage=_get(limits, "breakdown_V", ctx),
         burning_current_density=_get(limits, "burning_A_dm2", ctx) * u.A_PER_DM2,
         calibrated=bool(d.get("calibrated", False)),
+        **_thermal(d.get("thermal", {}), ctx),
     )
+
+
+def _thermal(d: dict, ctx: str) -> dict:
+    """선택 항목: 열수지용 밀도·비열 (없으면 묽은 수용액 기본값)."""
+    density = float(d.get("density_g_cm3", 1.10)) * u.G_PER_CM3
+    heat_capacity = float(d.get("heat_capacity_J_gK", 3.6)) * 1000.0
+    if not (density > 0 and heat_capacity > 0):
+        raise PresetError(f"{ctx}: thermal 의 밀도·비열은 0보다 커야 합니다.")
+    return {"density": density, "heat_capacity": heat_capacity}
 
 
 def parse_cathode(d: dict) -> CathodeMaterial:

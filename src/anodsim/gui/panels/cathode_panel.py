@@ -48,6 +48,14 @@ class CathodePanel(QWidget):
     def material_id(self) -> str:
         return self.material.currentData()
 
+    def set_material(self, material_id: str) -> None:
+        """프로젝트 불러오기: 저장된 음극재를 고른다 (사용자가 고른 것으로 취급)."""
+        index = self.material.findData(material_id)
+        if index < 0:
+            raise ValueError(f"알 수 없는 음극재: {material_id}")
+        self.material.setCurrentIndex(index)
+        self._user_picked = True
+
     def set_electrolyte(self, preset) -> None:
         """전해질이 바뀌면 추천 음극을 보여주고, 사용자가 고른 적이 없거나 맞지 않으면 추천 1순위로 바꾼다."""
         self._electrolyte = preset

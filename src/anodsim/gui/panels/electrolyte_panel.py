@@ -63,6 +63,18 @@ class ElectrolytePanel(QWidget):
         self._temperature = temperature_k
         self._refresh_properties()
 
+    def set_recipe(self, preset_id: str, concentration: float | None) -> None:
+        """프로젝트 불러오기: 프리셋을 고르고 (→ preset_changed) 농도를 넣는다 (None = 프리셋 기준 농도)."""
+        index = self.preset.findData(preset_id)
+        if index < 0:
+            raise ValueError(f"이 금속에서 쓸 수 없는 전해질 프리셋입니다: {preset_id}")
+        if index == self.preset.currentIndex():
+            self._on_preset()
+        else:
+            self.preset.setCurrentIndex(index)
+        if concentration is not None:
+            self.concentration.setValue(concentration)
+
     def current_preset(self):
         preset_id = self.preset.currentData()
         return None if preset_id is None else self.presets.electrolyte(preset_id)

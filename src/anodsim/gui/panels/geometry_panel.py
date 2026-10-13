@@ -16,6 +16,7 @@ class PlateEditor(QGroupBox):
     def __init__(self, title: str, plate: PlateElectrode, checkable: bool = False, parent=None):
         super().__init__(title, parent)
         self.setCheckable(checkable)
+        self._y_center = None
         self.x = spin(0.0, -1000.0, 1000.0, decimals=1, step=0.5, suffix="cm")
         self.z = spin(0.0, -1000.0, 1000.0, decimals=1, step=0.5, suffix="cm")
         self.height_box = spin(1.0, 0.1, 1000.0, decimals=1, step=0.5, suffix="cm")
@@ -39,6 +40,7 @@ class PlateEditor(QGroupBox):
             height=self.height_box.value() * u.CM,
             thickness=self.thickness.value() * u.MM,
             width=self.width_box.value() * u.CM,
+            y_center=self._y_center,
         )
 
     def set_position(self, x_center: float, z_bottom: float) -> bool:
@@ -53,6 +55,7 @@ class PlateEditor(QGroupBox):
         return changed
 
     def set_plate(self, plate: PlateElectrode) -> None:
+        self._y_center = plate.y_center   # 화면에 칸은 없지만 프로젝트 파일 값은 그대로 지킨다
         boxes = ((self.x, plate.x_center / u.CM), (self.z, plate.z_bottom / u.CM),
                  (self.height_box, plate.height / u.CM), (self.width_box, plate.width / u.CM),
                  (self.thickness, plate.thickness / u.MM))
@@ -123,14 +126,20 @@ class GeometryPanel(QWidget):
         return changed
 
     def reset(self) -> None:
-        default = Geometry.default()
-        self._set_tank(default.tank)
-        self.anode.set_plate(default.anode)
-        for editor, plate in zip((self.cathode1, self.cathode2), default.cathodes, strict=True):
+        self.set_geometry(Geometry.default())
+
+    def set_geometry(self, g: Geometry) -> None:
+        """전체 배치를 입력 칸에 넣는다 (음극은 최대 2장). changed 는 한 번만 보낸다."""
+        if len(g.cathodes) > 2:
+            raise ValueError("이 화면에서는 음극을 2장까지 다룰 수 있습니다.")
+        self._set_tank(g.tank)
+        self.anode.set_plate(g.anode)
+        for k, editor in enumerate((self.cathode1, self.cathode2)):
             editor.blockSignals(True)
-            editor.setChecked(True)
+            editor.setChecked(k < len(g.cathodes))
             editor.blockSignals(False)
-            editor.set_plate(plate)
+            if k < len(g.cathodes):
+                editor.set_plate(g.cathodes[k])
         self.changed.emit()
 
     def _set_tank(self, tank: Tank) -> None:

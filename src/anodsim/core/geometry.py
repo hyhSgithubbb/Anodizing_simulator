@@ -109,6 +109,13 @@ class Geometry:
     def anode_area(self) -> float:
         return self.anode.wetted_area(self.tank.liquid_level)
 
+    def liquid_volume(self) -> float:
+        """전해질 부피 [m³] — 액면 아래 전해조 부피에서 잠긴 전극 부피를 뺀 값."""
+        t = self.tank
+        level = min(t.liquid_level, t.height)
+        electrodes = sum(e.thickness * e.width * e.immersed_height(level) for e in (self.anode, *self.cathodes))
+        return max(t.width * t.depth * level - electrodes, 0.0)
+
     @property
     def cathode_area(self) -> float:
         return sum(c.wetted_area(self.tank.liquid_level) for c in self.cathodes)

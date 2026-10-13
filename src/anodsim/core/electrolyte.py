@@ -81,6 +81,8 @@ class ElectrolytePreset:
     breakdown_voltage: float           # V
     burning_current_density: float     # A/m²
     calibrated: bool = False
+    density: float = 1100.0            # kg/m³ — 열수지용
+    heat_capacity: float = 3600.0      # J/(kg·K) — 열수지용
 
     def conductivity(self, temperature: float, concentration: float | None = None) -> float:
         c = self.concentration_ref if concentration is None else concentration

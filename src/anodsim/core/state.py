@@ -8,7 +8,8 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .geometry import Geometry
-from .power_supply import PowerSetting
+from .power_supply import PowerProgram, PowerSetting
+from .thermal import ThermalSetting
 
 SUPPORTED_FIDELITY = ("L0", "L1", "L2")
 MAX_ELEMENTS = 400
@@ -25,14 +26,15 @@ class ProcessConfig:
     metal: str                       # "Al" | "Ti"
     electrolyte: ElectrolyteRecipe
     cathode_material: str            # 음극재 프리셋 id
-    power: PowerSetting
+    power: PowerSetting | PowerProgram  # 단일 설정 또는 다단계 프로그램
     geometry: Geometry
-    bath_temperature: float          # K
-    duration: float                  # s
+    bath_temperature: float          # K — 초기 욕 온도 (열수지가 없으면 내내 이 온도)
+    duration: float                  # s — 프로그램이면 프로그램 길이 이하
     fidelity: str = "L0"             # "L0" (0D) | "L1" (위치별, 경로 저항 근사) | "L2" (위치별, FDM 전위장)
     elements: int = 120              # L1·L2 표면 요소 수 (목표값)
     offset_voltage: float = 0.0      # V — 가역 셀 전압 + 접점 전압 (묶음)
     external_resistance: float = 0.0  # Ω — 버스바·케이블
+    thermal: ThermalSetting | None = None   # None 이면 욕 온도 일정
 
     def validate(self, presets) -> list[str]:
         errors: list[str] = []
@@ -47,6 +49,10 @@ class ProcessConfig:
         if self.external_resistance < 0:
             errors.append("외부 저항은 0 이상이어야 합니다.")
         errors += self.power.validate()
+        if isinstance(self.power, PowerProgram) and self.duration > self.power.duration * (1 + 1e-9):
+            errors.append(f"공정 시간이 전원 프로그램 길이({self.power.duration / 60:g} min)보다 깁니다.")
+        if self.thermal is not None:
+            errors += self.thermal.validate()
         errors += self.geometry.validate()
         if self.metal not in presets.metals:
             errors.append(f"알 수 없는 금속: {self.metal}")
@@ -71,6 +77,7 @@ class SimState:
     porous: np.ndarray        # h_p [m]
     metal_loss: np.ndarray    # 금속 후퇴 [m]
     charge: np.ndarray        # 누적 전하 [C/m²]
+    temperature: float = 0.0  # 욕 온도 [K]
 
     @property
     def total(self) -> np.ndarray:
@@ -94,3 +101,5 @@ class Snapshot:
     metal_loss: np.ndarray
     charge: np.ndarray
     flags: frozenset[str] = field(default_factory=frozenset)
+    temperature: float = 0.0          # 욕 온도 [K]
+    step: int = 0                     # 전원 프로그램 단계 번호 (0부터, 반복은 이어서 센다)
