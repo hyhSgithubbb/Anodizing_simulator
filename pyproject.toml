@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anodsim"
+version = "0.1.0"
+description = "Al / Ti 아노다이징 산화막(Al2O3, TiO2) 성장 시뮬레이터"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "PyQt6>=6.5",
+    "pyqtgraph>=0.13.3",
+    "PyOpenGL>=3.1.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-qt>=4.2"]
+
+[project.scripts]
+anodsim-cli = "anodsim.cli:main"
+
+[project.gui-scripts]
+anodsim = "anodsim.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"anodsim.data" = ["*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

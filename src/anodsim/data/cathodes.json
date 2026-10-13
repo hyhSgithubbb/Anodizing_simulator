@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "note": "수소발생 반응(HER) 교환전류밀도·Tafel 기울기의 산성 용액 기준 근사값.",
+  "cathodes": [
+    {"id": "pb", "name": "납 (Pb)", "log10_j0_A_cm2": -12.6, "tafel_slope_V_per_decade": 0.12,
+     "incompatible_tags": ["fluoride"], "note": "전통적인 황산욕 음극. 수소 과전압이 커서 셀 전압이 높아진다."},
+    {"id": "al", "name": "알루미늄 (Al)", "log10_j0_A_cm2": -10.0, "tafel_slope_V_per_decade": 0.12,
+     "incompatible_tags": ["fluoride"], "note": "황산욕 음극으로 사용. 불소계에서는 부식된다."},
+    {"id": "sus316", "name": "스테인리스강 (SUS316)", "log10_j0_A_cm2": -6.0, "tafel_slope_V_per_decade": 0.12,
+     "incompatible_tags": ["fluoride"], "note": "범용 음극. 불소 함유 전해질에서는 부식 주의."},
+    {"id": "ti", "name": "티타늄 (Ti)", "log10_j0_A_cm2": -8.2, "tafel_slope_V_per_decade": 0.12,
+     "incompatible_tags": ["fluoride"], "note": "Ti 공정의 동종 음극. 불소계에서는 수소화·부식 위험."},
+    {"id": "graphite", "name": "흑연 (Graphite)", "log10_j0_A_cm2": -6.5, "tafel_slope_V_per_decade": 0.12,
+     "incompatible_tags": [], "note": "불소계 전해질에서도 쓸 수 있는 대체 음극."},
+    {"id": "pt", "name": "백금 (Pt)", "log10_j0_A_cm2": -3.1, "tafel_slope_V_per_decade": 0.03,
+     "incompatible_tags": [], "note": "수소 과전압이 가장 작다. 고가 — 주로 실험실용."}
+  ]
+}
