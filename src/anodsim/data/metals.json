@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "note": "순수 금속만 다룬다 (합금 미지원). 산화막 밀도는 양극산화 비정질막 기준.",
+  "metals": [
+    {
+      "symbol": "Al",
+      "name": "알루미늄 (순수 Al, 1xxx 계열)",
+      "molar_mass_g_mol": 26.9815,
+      "density_g_cm3": 2.70,
+      "valence": 3,
+      "native_oxide_nm": 3.0,
+      "oxide": {
+        "formula": "Al2O3",
+        "molar_mass_g_mol": 101.961,
+        "density_g_cm3": 3.2,
+        "electrons_per_formula": 6,
+        "metal_atoms_per_formula": 2,
+        "refractive_index": 1.65
+      }
+    },
+    {
+      "symbol": "Ti",
+      "name": "티타늄 (CP Ti)",
+      "molar_mass_g_mol": 47.867,
+      "density_g_cm3": 4.506,
+      "valence": 4,
+      "native_oxide_nm": 5.0,
+      "oxide": {
+        "formula": "TiO2",
+        "molar_mass_g_mol": 79.866,
+        "density_g_cm3": 3.8,
+        "electrons_per_formula": 4,
+        "metal_atoms_per_formula": 1,
+        "refractive_index": 2.3
+      }
+    }
+  ]
+}
