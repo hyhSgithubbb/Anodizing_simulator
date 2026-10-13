@@ -10,7 +10,7 @@ import numpy as np
 from .geometry import Geometry
 from .power_supply import PowerSetting
 
-SUPPORTED_FIDELITY = ("L0", "L1")
+SUPPORTED_FIDELITY = ("L0", "L1", "L2")
 MAX_ELEMENTS = 400
 
 
@@ -29,8 +29,8 @@ class ProcessConfig:
     geometry: Geometry
     bath_temperature: float          # K
     duration: float                  # s
-    fidelity: str = "L0"             # "L0" (0D) | "L1" (위치별, 경로 저항 근사)
-    elements: int = 120              # L1 표면 요소 수 (목표값)
+    fidelity: str = "L0"             # "L0" (0D) | "L1" (위치별, 경로 저항 근사) | "L2" (위치별, FDM 전위장)
+    elements: int = 120              # L1·L2 표면 요소 수 (목표값)
     offset_voltage: float = 0.0      # V — 가역 셀 전압 + 접점 전압 (묶음)
     external_resistance: float = 0.0  # Ω — 버스바·케이블
 

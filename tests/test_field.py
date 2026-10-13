@@ -14,8 +14,8 @@ from anodsim.core.simulator import Simulator
 from conftest import ideal_presets, make_config
 
 
-def _l1(**kwargs):
-    return replace(make_config(**kwargs), fidelity="L1")
+def _l1(fidelity="L1", **kwargs):
+    return replace(make_config(**kwargs), fidelity=fidelity)
 
 
 def _scaled_conductivity(db: PresetDB, preset_id: str, factor: float) -> PresetDB:
@@ -92,21 +92,23 @@ def test_resistance_scales_inversely_with_conductivity():
 
 
 # ── 위치별 두께 ──────────────────────────────────────────────────────────────
-def test_symmetric_layout_gives_symmetric_distribution(presets):
+@pytest.mark.parametrize("fidelity", ["L1", "L2"])
+def test_symmetric_layout_gives_symmetric_distribution(presets, fidelity):
     """§1.13-5 (엔진 수준): 좌우 대칭 배치 → 좌우 대칭 두께."""
-    sim = Simulator(_l1(metal="Ti", preset="ti_nanotube_eg", cathode="pt", voltage=60.0, ramp=30.0,
+    sim = Simulator(_l1(fidelity, metal="Ti", preset="ti_nanotube_eg", cathode="pt", voltage=60.0, ramp=30.0,
                         minutes=10.0), presets)
     res = sim.run()
     left, right = _mirror(res.mesh, res.final.total, Geometry.default().anode.x_center)
     assert left.size == right.size > 10
-    assert np.allclose(left, right, rtol=1e-9)
+    assert np.allclose(left, right, rtol=1e-9)        # L2 격자도 거울 대칭으로 만든다
     assert res.uniformity > 0.01        # 저전도 전해질 → 판 끝이 더 두껍다 (분포가 실제로 생김)
 
 
-def test_one_sided_cathode_thins_back_face(presets):
+@pytest.mark.parametrize("fidelity", ["L1", "L2"])
+def test_one_sided_cathode_thins_back_face(presets, fidelity):
     g = Geometry.default()
     one = replace(g, cathodes=g.cathodes[:1])                  # 왼쪽 음극만
-    res = Simulator(_l1(metal="Ti", preset="ti_nanotube_eg", cathode="pt", voltage=60.0, ramp=30.0,
+    res = Simulator(_l1(fidelity, metal="Ti", preset="ti_nanotube_eg", cathode="pt", voltage=60.0, ramp=30.0,
                         minutes=10.0, geometry=one), presets).run()
     m, h = res.mesh, res.final.total
     assert h[m.face == 0].mean() > 1.1 * h[m.face == 2].mean()   # 음극을 마주보는 면이 두껍다
@@ -115,12 +117,13 @@ def test_one_sided_cathode_thins_back_face(presets):
     assert h[back][mid] == pytest.approx(h[back].min(), rel=0.02)  # 등진 면은 가운데(우회 경로 최장)가 가장 얇다
 
 
-def test_wagner_limit_high_conductivity_is_uniform(presets):
+@pytest.mark.parametrize("fidelity", ["L1", "L2"])
+def test_wagner_limit_high_conductivity_is_uniform(presets, fidelity):
     """§1.13-8: κ → ∞ 이면 막 저항만 남아 분포가 균일해진다. κ 가 작을수록 편차가 커진다."""
     spreads = []
     for factor in (1e-1, 1.0, 1e6):
         db = _scaled_conductivity(presets, "ti_nanotube_eg", factor)
-        res = Simulator(_l1(metal="Ti", preset="ti_nanotube_eg", cathode="pt", voltage=60.0, ramp=30.0,
+        res = Simulator(_l1(fidelity, metal="Ti", preset="ti_nanotube_eg", cathode="pt", voltage=60.0, ramp=30.0,
                             minutes=5.0), db).run()
         spreads.append((res.uniformity, res.wagner))
     assert spreads[2][0] < 1e-4
@@ -128,16 +131,17 @@ def test_wagner_limit_high_conductivity_is_uniform(presets):
     assert spreads[0][1] < spreads[1][1] < spreads[2][1]        # Wa ∝ κ
 
 
+@pytest.mark.parametrize("fidelity", ["L1", "L2"])
 @pytest.mark.parametrize("preset_id, metal, cathode, voltage", [
     ("al_sulfuric_typeII", "Al", "pb", 15.0),
     ("ti_color_acid", "Ti", "ti", 50.0),
 ])
-def test_charge_conservation_per_element(presets, preset_id, metal, cathode, voltage):
+def test_charge_conservation_per_element(presets, preset_id, metal, cathode, voltage, fidelity):
     """§1.13-3 을 요소마다: η·k_F·Q_i = 요소 i 의 치밀 산화물 부피."""
     db = ideal_presets(presets, preset_id)
     g = Geometry.default()
-    sim = Simulator(_l1(metal=metal, preset=preset_id, cathode=cathode, voltage=voltage, ramp=20.0, minutes=5.0,
-                        geometry=replace(g, cathodes=g.cathodes[:1])), db)
+    sim = Simulator(_l1(fidelity, metal=metal, preset=preset_id, cathode=cathode, voltage=voltage, ramp=20.0,
+                        minutes=5.0, geometry=replace(g, cathodes=g.cathodes[:1])), db)
     final = sim.run().final
     m = sim.model
     dense = (final.barrier - sim.metal.native_oxide_thickness) + (1 - m.props.porosity) * final.porous
@@ -153,12 +157,13 @@ def test_l1_cc_mode_holds_total_current(presets):
     assert np.allclose(res.current[cc], 2.0, rtol=1e-8)
 
 
-def test_l1_mean_close_to_l0(presets):
-    """막 저항이 지배하는 황산 Type II 에서는 L1 평균이 L0 와 비슷해야 한다."""
+@pytest.mark.parametrize("fidelity", ["L1", "L2"])
+def test_distributed_mean_close_to_l0(presets, fidelity):
+    """막 저항이 지배하는 황산 Type II 에서는 L1·L2 평균이 L0 와 비슷해야 한다."""
     l0 = Simulator(make_config(minutes=20.0), presets).run()
-    l1 = Simulator(_l1(minutes=20.0), presets).run()
-    assert l1.total[-1] == pytest.approx(l0.total[-1], rel=0.03)
-    assert l1.uniformity < 0.02
+    res = Simulator(_l1(fidelity, minutes=20.0), presets).run()
+    assert res.total[-1] == pytest.approx(l0.total[-1], rel=0.03)
+    assert res.uniformity < 0.02
 
 
 def test_profile_history_shape(presets):

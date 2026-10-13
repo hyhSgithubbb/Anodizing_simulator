@@ -146,7 +146,10 @@ class Simulator:
         self.supply = PowerSupply(config.power)
 
         geo = config.geometry
-        self.field: Field = build_field(geo, config.fidelity, config.elements)
+        try:
+            self.field: Field = build_field(geo, config.fidelity, config.elements)
+        except ValueError as exc:   # 검증을 통과했지만 해석할 수 없는 배치 (예: L2 에서 전해질 고립)
+            raise ConfigError([str(exc)]) from exc
         self.mesh = self.field.mesh
         self.areas = self.mesh.area                                       # m², (N,)
         self.resistance = self.field.resistance(self.props.conductivity)  # Ω, (N, N)
@@ -232,7 +235,7 @@ class Simulator:
                               self.wagner_number())
 
     def wagner_number(self) -> float:
-        """면적 가중 Wagner 수 Wa = (dU_f/dj) / (R_ii·a_i) — 막 분극 저항 / 전해질 저항.
+        """면적 가중 Wagner 수 Wa = (dU_f/dj) / (R·a)_i — 막 분극 저항 / 전해질 저항.
 
         Wa ≫ 1 이면 막이 분포를 지배해 균일하고, Wa ≪ 1 이면 형상(전해질 저항)이 지배해 편차가 크다.
         """
@@ -241,7 +244,8 @@ class Simulator:
         if op.control == "OFF" or not np.all(j > 0):
             return math.nan
         polarization = self.model.d_film_voltage_d_lnj(j, s.barrier) / j          # Ω·m²
-        electrolyte = np.diag(self.resistance) * self.areas                      # Ω·m²
+        # 모든 요소가 같은 전류밀도일 때 요소 i 에 걸리는 전해질 저항 (R·a)_i — 대각 R 이면 R_ii·a_i
+        electrolyte = self.resistance @ self.areas                               # Ω·m²
         return float(self.areas @ (polarization / electrolyte) / self.areas.sum())
 
     # ── 내부 ────────────────────────────────────────────────────────────────

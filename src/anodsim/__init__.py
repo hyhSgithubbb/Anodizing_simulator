@@ -10,4 +10,4 @@ for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
     _os.environ.setdefault(_var, "1")
 del _os, _var
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

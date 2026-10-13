@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "anodsim"
-version = "0.2.0"
+version = "0.3.0"
 description = "Al / Ti 아노다이징 산화막(Al2O3, TiO2) 성장 시뮬레이터"
 readme = "README.md"
 requires-python = ">=3.11"

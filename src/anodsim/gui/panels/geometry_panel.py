@@ -41,6 +41,17 @@ class PlateEditor(QGroupBox):
             width=self.width_box.value() * u.CM,
         )
 
+    def set_position(self, x_center: float, z_bottom: float) -> bool:
+        """위치만 바꾼다 (신호 없이). 값이 바뀌었으면 True."""
+        changed = False
+        for box, value in ((self.x, x_center / u.CM), (self.z, z_bottom / u.CM)):
+            if abs(box.value() - value) > 1e-9:
+                box.blockSignals(True)
+                box.setValue(value)
+                box.blockSignals(False)
+                changed = True
+        return changed
+
     def set_plate(self, plate: PlateElectrode) -> None:
         boxes = ((self.x, plate.x_center / u.CM), (self.z, plate.z_bottom / u.CM),
                  (self.height_box, plate.height / u.CM), (self.width_box, plate.width / u.CM),
@@ -96,6 +107,20 @@ class GeometryPanel(QWidget):
                     height=self.tank_h.value() * u.CM, liquid_level=self.level.value() * u.CM)
         cathodes = tuple(e.plate() for e in (self.cathode1, self.cathode2) if e.isChecked())
         return Geometry(tank, self.anode.plate(), cathodes)
+
+    def set_electrode_position(self, kind: str, index: int, x_center: float, z_bottom: float) -> bool:
+        """측면도에서 끌어 옮긴 전극의 위치를 입력 칸에 반영한다. 값이 바뀌면 changed 를 한 번 보낸다.
+
+        index 는 Geometry.cathodes 안의 순번이다 (체크된 음극만 들어가므로 체크된 편집기 순서로 찾는다).
+        """
+        if kind == "anode":
+            editor = self.anode
+        else:
+            editor = [e for e in (self.cathode1, self.cathode2) if e.isChecked()][index]
+        changed = editor.set_position(x_center, z_bottom)
+        if changed:
+            self.changed.emit()
+        return changed
 
     def reset(self) -> None:
         default = Geometry.default()

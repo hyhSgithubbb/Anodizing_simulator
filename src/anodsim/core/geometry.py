@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 _MIN_PATH = 1e-3  # m — 경로 저항 근사에서 쓰는 최소 거리
+MIN_CLEARANCE = 1e-3  # m — 양극과 음극·전해조 벽·바닥 사이 최소 간격 (닿으면 단락이거나 그 면이 젖지 않는다)
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,12 @@ class PlateElectrode:
         ends = (1.0 + float(self.fully_immersed(liquid_level))) * self.thickness * self.width
         return 2.0 * h * self.width + 2.0 * h * self.thickness + ends
 
+    def side_gap(self, other: PlateElectrode) -> float:
+        """측면도(x–z)에서 두 판 단면 사이의 최단 거리 [m] (겹치면 0)."""
+        dx = max(other.x_min - self.x_max, self.x_min - other.x_max, 0.0)
+        dz = max(other.z_bottom - self.z_top, self.z_bottom - other.z_top, 0.0)
+        return (dx * dx + dz * dz) ** 0.5
+
     def box(self, tank: Tank) -> Box:
         yc = 0.5 * tank.depth if self.y_center is None else self.y_center
         return Box(self.x_min, self.x_max, yc - 0.5 * self.width, yc + 0.5 * self.width,
@@ -128,7 +135,17 @@ class Geometry:
                 errors.append(f"{name}: 바닥 높이는 0 이상이어야 합니다.")
             if e.immersed_height(t.liquid_level) <= 0:
                 errors.append(f"{name}: 전해질에 잠기지 않았습니다.")
-        boxes = [(name, e.box(t)) for name, e in named if min(e.height, e.thickness, e.width) > 0]
+        a = self.anode
+        if min(a.height, a.thickness, a.width) > 0:
+            b = a.box(t)
+            if (min(b.x0, t.width - b.x1, a.z_bottom) < MIN_CLEARANCE
+                    and b.x0 >= 0 and b.x1 <= t.width and a.z_bottom >= 0):
+                errors.append("양극: 전해조 벽·바닥과 1 mm 이상 떨어져야 합니다 (닿은 면은 전해질에 젖지 않음).")
+            for i, c in enumerate(self.cathodes, start=1):
+                if min(c.height, c.thickness, c.width) > 0 and a.side_gap(c) < MIN_CLEARANCE:
+                    # 측면도 단면 기준: 깊이(y) 위치가 달라도 2D 해석에서는 닿은 것과 같다
+                    errors.append(f"양극과 음극 {i}이(가) 겹칩니다 (측면도에서 간격 1 mm 미만).")
+        boxes = [(name, e.box(t)) for name, e in named[1:] if min(e.height, e.thickness, e.width) > 0]
         for i in range(len(boxes)):
             for k in range(i + 1, len(boxes)):
                 if boxes[i][1].overlaps(boxes[k][1]):

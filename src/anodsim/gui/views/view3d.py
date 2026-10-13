@@ -206,6 +206,15 @@ class Geometry3DView(QWidget):
         self.legend.set_range(vmin, vmax, label)
         self._place_legend()
 
+    def clear_profile(self) -> None:
+        """두께 색칠을 지운다 (새 계산을 시작할 때)."""
+        if self.view is None:
+            return
+        if self._surface is not None:
+            self.view.removeItem(self._surface)
+            self._surface = None
+        self.legend.hide()
+
     def _build_surface(self, mesh):
         box = self._geometry.anode.box(self._geometry.tank)
         quads, owner = anode_surface_quads(mesh, box, eps=0.3 * u.MM)

@@ -13,6 +13,10 @@ from .. import style
 THICKNESS_CMAP = pg.colormap.get("viridis")
 # 발산(diverging) 색상표: 평균 대비 편차 (가운데 = 0)
 DEVIATION_CMAP = pg.colormap.get("CET-D1")
+# 전해질 전위: 두께(viridis)와 같은 화면에 함께 나오므로 다른 색조의 단색 순차 램프 (주황, 밝음 → 어두움).
+# OKLCH 에서 색조를 고정하고 명도만 0.96 → 0.40 으로 단조 감소시킨 7단계.
+POTENTIAL_CMAP = pg.ColorMap(np.linspace(0.0, 1.0, 7),
+                             ["#ffeee8", "#fec4af", "#ff956f", "#ee6b37", "#cd4d10", "#a43a05", "#7b2902"])
 
 
 def value_range(values) -> tuple[float, float]:
@@ -32,18 +36,18 @@ def colors(values, vmin: float, vmax: float) -> np.ndarray:
     return np.asarray(THICKNESS_CMAP.map(t, mode="float"), dtype=float)
 
 
-def _gradient_css() -> str:
+def _gradient_css(cmap) -> str:
     stops = []
     for t in np.linspace(0.0, 1.0, 9):
-        r, g, b, _ = THICKNESS_CMAP.map(float(t), mode="byte")
+        r, g, b, _ = cmap.map(float(t), mode="byte")
         stops.append(f"stop:{t:.3f} rgb({r},{g},{b})")
     return f"qlineargradient(x1:0, y1:0, x2:1, y2:0, {', '.join(stops)})"
 
 
 class ColorLegend(QFrame):
-    """'산화막 두께 [μm]' 가로 색 막대 + 최소·최대 값. 다른 위젯 위에 겹쳐 놓는다."""
+    """'산화막 두께 [μm]' 같은 제목 + 가로 색 막대 + 최소·최대 값. 다른 위젯 위에 겹쳐 놓는다."""
 
-    def __init__(self, title: str = "산화막 두께 [μm]", parent: QWidget | None = None):
+    def __init__(self, title: str = "산화막 두께 [μm]", parent: QWidget | None = None, cmap=THICKNESS_CMAP):
         super().__init__(parent)
         self.setStyleSheet(f"ColorLegend {{ background: rgba(252, 252, 251, 225); border: 1px solid {style.GRID}; "
                            "border-radius: 4px; }")
@@ -51,7 +55,7 @@ class ColorLegend(QFrame):
         self.title = QLabel(title)
         self.bar = QFrame()
         self.bar.setFixedHeight(10)
-        self.bar.setStyleSheet(f"background: {_gradient_css()}; border: none; border-radius: 2px;")
+        self.bar.setStyleSheet(f"background: {_gradient_css(cmap)}; border: none; border-radius: 2px;")
         self.low = QLabel()
         self.high = QLabel()
         for label in (self.title, self.low, self.high):

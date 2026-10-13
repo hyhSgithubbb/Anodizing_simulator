@@ -30,3 +30,9 @@ def test_l1_profile_csv(tmp_path, capsys):
     rows = list(csv.DictReader(out.open(encoding="utf-8")))
     assert len(rows) > 100
     assert {r["face"] for r in rows} == {"−x 면", "바닥", "+x 면", "윗면"}
+
+
+def test_l2_run_prints_grid(capsys):
+    assert cli.main(["--metal", "Al", "--mode", "CV", "--voltage", "15", "--minutes", "1", "--fidelity", "L2"]) == 0
+    text = capsys.readouterr().out
+    assert "해석 L2" in text and "FDM 격자" in text and "Wagner" in text

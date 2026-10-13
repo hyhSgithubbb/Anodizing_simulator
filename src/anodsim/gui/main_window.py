@@ -5,6 +5,8 @@ from __future__ import annotations
 import html
 import math
 
+import numpy as np
+
 from PyQt6.QtCore import Qt, QThread, QTimer
 from PyQt6.QtWidgets import (QComboBox, QDockWidget, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar,
                              QPushButton, QScrollArea, QSplitter, QTabWidget, QVBoxLayout, QWidget)
@@ -17,7 +19,7 @@ from ..core.simulator import ConfigError, Simulator
 from ..core.state import ProcessConfig
 from . import style
 from .panels import CathodePanel, ElectrolytePanel, GeometryPanel, ProcessPanel
-from .views import Geometry3DView, ResultsView, SideView
+from .views import Geometry3DView, ResultsView, SideViewPanel
 from .views.colormap import value_range
 from .views.view3d import VIEW_PRESETS
 from .worker import SimulationWorker
@@ -47,6 +49,7 @@ class MainWindow(QMainWindow):
         self._thread: QThread | None = None
         self._worker: SimulationWorker | None = None
         self._simulator: Simulator | None = None
+        self._overlay = None   # 마지막으로 칠한 (요소별 두께, 요소별 전류밀도) — 다시 칠하기용
         self._live_timer = QTimer(self)
         self._live_timer.timeout.connect(self._pull_live)
 
@@ -100,10 +103,11 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
 
         # ── 가운데: 형상 보기 + 결과 ────────────────────────────────────────
-        self.side_view = SideView()
+        self.side_panel = SideViewPanel()
+        self.side_view = self.side_panel.view
         self.view3d = Geometry3DView()
         self.view_tabs = QTabWidget()
-        self.view_tabs.addTab(self.side_view, "측면도 (2D)")
+        self.view_tabs.addTab(self.side_panel, "측면도 (2D)")
         self.view_tabs.addTab(self.view3d, "3D 보기")
         self.results = ResultsView()
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -128,6 +132,8 @@ class MainWindow(QMainWindow):
         self.stop_button.clicked.connect(self.stop_simulation)
         self.speed.currentIndexChanged.connect(self._on_speed)
         self.results.time_selected.connect(self._on_time_selected)
+        self.side_view.electrode_moved.connect(self._on_electrode_moved)
+        self.side_panel.show_potential.toggled.connect(lambda _: self._repaint_overlay())
 
         self._on_metal(self.process.metal_symbol())
 
@@ -150,6 +156,12 @@ class MainWindow(QMainWindow):
         self.side_view.show_geometry(g)
         self.view3d.show_geometry(g)
         self._refresh()
+        self._repaint_overlay()   # 제자리로 돌아온 경우 등 형상이 결과와 같으면 색칠을 되살린다
+
+    def _on_electrode_moved(self, kind: str, index: int, x_center: float, z_bottom: float) -> None:
+        """측면도에서 끌어 놓은 위치를 배치 탭 입력에 반영한다 (→ changed → _on_geometry)."""
+        if not self.geometry.set_electrode_position(kind, index, x_center, z_bottom):
+            self._on_geometry()   # 같은 자리에 놓음: 끄는 동안 감춘 표시를 다시 그린다
 
     def _refresh(self) -> None:
         """입력 검증, 파생 값(전류밀도 환산·면적·저항) 갱신."""
@@ -210,6 +222,11 @@ class MainWindow(QMainWindow):
             return
         self._set_running(True)
         sim = self._simulator
+        self._overlay = None          # 이전 실행의 색칠은 새 결과가 올 때까지 남기지 않는다
+        self.side_view.clear_profile()
+        self.side_view.clear_potential()
+        self.view3d.clear_profile()
+        self.side_panel.show_potential.setEnabled(sim.field.has_potential)
         self.results.start_live(sim.mesh, sim.props.regime, config.duration)
         self._thread = QThread(self)
         self._worker = SimulationWorker(sim, self.speed.currentData())
@@ -243,18 +260,20 @@ class MainWindow(QMainWindow):
         snap = worker.take_snapshot()
         if snap is not None:
             self.results.add_live(snap)
-            self._paint_thickness(snap.total)
+            self._paint_overlay(snap.total, snap.current_density)
 
     def _on_time_selected(self, time_s: float) -> None:
         r = self.results._result
         if r is None:
             return
         k = int(min(max(r.profile_time.searchsorted(time_s), 0), r.profile_time.size - 1))
-        self._paint_thickness(r.profile_total[k])
+        self._paint_overlay(r.profile_total[k], r.profile_current_density[k])
 
-    def _paint_thickness(self, total) -> None:
-        """측면도·3D 양극 표면을 요소별 두께로 색칠 (요소 2개 이상일 때)."""
+    def _paint_overlay(self, total, current_density) -> None:
+        """측면도·3D 양극 표면을 요소별 두께로, L2 면 측면도 전해질을 전위로 색칠한다."""
+        self._overlay = (total, current_density)
         sim = self._simulator
+        self.side_panel.show_potential.setEnabled(sim is not None and sim.field.has_potential)
         # 계산 뒤 형상을 바꿨으면 이전 결과의 요소가 새 형상과 맞지 않으므로 칠하지 않는다
         if sim is None or sim.mesh.size < 2 or sim.config.geometry != self.geometry.geometry():
             return
@@ -263,13 +282,23 @@ class MainWindow(QMainWindow):
         vmin, vmax = value_range(values)
         self.side_view.set_profile(mesh, values, vmin, vmax, THICKNESS_LABEL)
         self.view3d.set_profile(mesh, values, vmin, vmax, THICKNESS_LABEL)
+        if sim.field.has_potential and self.side_panel.show_potential.isChecked():
+            image, extent = sim.field.potential_image(current_density * mesh.area, sim.props.conductivity)
+            peak = float(np.nanmax(image)) if np.any(np.isfinite(image)) else 0.0
+            self.side_view.set_potential(image, extent, max(peak, 1e-6))
+        else:
+            self.side_view.clear_potential()
+
+    def _repaint_overlay(self) -> None:
+        if self._overlay is not None:
+            self._paint_overlay(*self._overlay)
 
     def _on_finished(self, result, stopped: bool) -> None:
         self._cleanup_thread()
         self.progress.setValue(1000)
         self.results.show_result(result, self._simulator.props.regime, stopped)
         f = result.final
-        self._paint_thickness(f.total)
+        self._paint_overlay(f.total, f.current_density)
         mean = float(result.total[-1])
         spread = f" (위치별 {f.total.min() / u.UM:.3g}–{f.total.max() / u.UM:.3g} μm)" if result.mesh.size > 1 else ""
         self.statusBar().showMessage(
@@ -295,6 +324,7 @@ class MainWindow(QMainWindow):
 
     def _set_running(self, running: bool) -> None:
         self.input_tabs.setEnabled(not running)
+        self.side_view.set_editable(not running)
         self.run_button.setEnabled(not running)
         self.stop_button.setEnabled(running)
         if running:

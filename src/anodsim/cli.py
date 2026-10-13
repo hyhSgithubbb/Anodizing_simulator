@@ -42,8 +42,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--minutes", type=float, default=60.0, help="공정 시간 [min]")
     p.add_argument("--temperature", type=float, help="욕 온도 [°C] (기본: 프리셋 기준 온도)")
     p.add_argument("--fidelity", choices=list(FIDELITY_LEVELS), default="L1",
-                   help="해석 단계: L0 = 양극 평균(0D), L1 = 위치별 두께 (기본)")
-    p.add_argument("--elements", type=int, default=DEFAULT_ELEMENTS, help="L1 표면 요소 수 (목표값)")
+                   help="해석 단계: L0 = 양극 평균(0D), L1 = 위치별 두께 경로 근사 (기본), L2 = 위치별 두께 FDM 전위장")
+    p.add_argument("--elements", type=int, default=DEFAULT_ELEMENTS, help="L1·L2 표면 요소 수 (목표값)")
     p.add_argument("--one-cathode", action="store_true", help="기본 배치에서 음극을 왼쪽 1장만 쓴다")
     p.add_argument("--csv", help="시간 이력을 CSV 로 저장할 경로")
     p.add_argument("--profile-csv", help="최종 위치별 분포(요소별 두께·전류밀도)를 CSV 로 저장할 경로")
@@ -122,8 +122,13 @@ def print_result(sim: Simulator, result) -> None:
     cfg = sim.config
     print(f"{sim.metal.symbol} / {sim.preset.name} / 음극 {sim.cathode.name} / 해석 {cfg.fidelity} "
           f"(표면 요소 {sim.mesh.size}개)")
-    r_total = 1.0 / np.sum(1.0 / np.diag(sim.resistance))   # 요소 저항의 병렬 합 (대각 R)
-    print(f"양극 면적 {sim.areas.sum() / u.CM ** 2:.1f} cm², 전해질 저항 {r_total * 1e3:.1f} mΩ, "
+    if sim.field.fdm is not None:
+        fdm = sim.field.fdm
+        print(f"FDM 격자 {fdm.x.size} × {fdm.z.size} (미지수 {fdm.unknown.size}개), 등가 깊이 {fdm.depth / u.CM:.2f} cm")
+    ones = np.ones(sim.mesh.size)
+    r_total = 1.0 / float(ones @ np.linalg.solve(sim.resistance, ones))   # 양극 전체가 등전위일 때의 저항
+    r_text = f"{r_total:.3g} Ω" if r_total >= 1.0 else f"{r_total * 1e3:.3g} mΩ"
+    print(f"양극 면적 {sim.areas.sum() / u.CM ** 2:.1f} cm², 전해질 저항 {r_text}, "
           f"κ = {sim.props.conductivity:.3g} S/m, 욕 온도 {u.kelvin_to_celsius(cfg.bath_temperature):.1f} °C")
     print(f"{'t [min]':>8} {'U [V]':>8} {'I [A]':>8} {'j [A/dm²]':>10} {'U_f [V]':>8} "
           f"{'δ_b [nm]':>9} {'h_p [μm]':>9} {'h [μm]':>9}  제어")

@@ -4,6 +4,7 @@ import math
 import time
 from dataclasses import replace
 
+import numpy as np
 import pytest
 
 pytest.importorskip("pytestqt")
@@ -85,13 +86,99 @@ def test_run_simulation_end_to_end(window, qtbot):
 
 
 def test_l0_run_disables_distribution_tab(window, qtbot):
+    window.process.duration.setValue(2.0)                     # 먼저 L1 으로 색칠해 둔 뒤
+    window.run_button.click()
+    qtbot.waitUntil(lambda: window._thread is None, timeout=30000)
+    assert window.side_view._strips
     window.process.fidelity.setCurrentIndex(window.process.fidelity.findData("L0"))
     window.process.duration.setValue(2.0)
     window.run_button.click()
     qtbot.waitUntil(lambda: window._thread is None, timeout=30000)
     assert window.results._result.mesh.size == 1
     assert not window.results.tabs.isTabEnabled(1)
-    assert not window.side_view._strips
+    assert not window.side_view._strips                       # 이전 L1 결과의 색칠이 남지 않는다
+    if window.view3d.view is not None:
+        assert window.view3d._surface is None
+
+
+def test_l2_run_draws_potential_field(window, qtbot):
+    window.process.fidelity.setCurrentIndex(window.process.fidelity.findData("L2"))
+    window.process.duration.setValue(2.0)
+    window.run_button.click()
+    qtbot.waitUntil(lambda: window._thread is None, timeout=60000)
+    assert window._simulator.field.has_potential
+    toggle = window.side_panel.show_potential
+    assert toggle.isEnabled() and toggle.isChecked()
+    side = window.side_view
+    assert side._potential is not None and side.potential_legend.isVisible()
+    image = side._potential.image
+    assert image.shape[1] == 400 and np.nanmax(image) > 0
+    toggle.setChecked(False)
+    assert side._potential is None and not side.potential_legend.isVisible()
+    toggle.setChecked(True)
+    assert side._potential is not None
+    # 시간 이력 위에 마우스를 올린 시각의 전위장으로 바뀐다
+    window._on_time_selected(10.0)
+    assert np.nanmax(side._potential.image) != pytest.approx(np.nanmax(image))
+
+
+def _handle(window, kind, index=0):
+    return next(h for h in window.side_view._handles if h.kind == kind and h.index == index)
+
+
+def test_drag_electrode_in_side_view_updates_inputs(window, qtbot):
+    anode = _handle(window, "anode")
+    start = anode.pos()
+    anode.setPos(QPointF(start.x() + 3.04, start.y() + 1.0), finish=False)    # 끄는 중
+    side = window.side_view
+    assert all(not item.isVisible() for item in side._gap_items)              # 이전 극간 거리는 감춤
+    assert "x 23.0 cm" in side._drag_label.toPlainText()
+    anode.sigRegionChangeFinished.emit(anode)                                 # 놓기
+    qtbot.waitUntil(lambda: window.geometry.anode.x.value() == pytest.approx(23.0), timeout=3000)
+    assert window.geometry.anode.z.value() == pytest.approx(9.0)              # 1 mm 단위로 맞춤
+    assert window.run_button.isEnabled()
+    assert _handle(window, "anode").pos().x() == pytest.approx(23.0 - 0.1)    # 새 배치로 다시 그림
+
+    # 음극을 양극 위로 끌면 끄는 동안 빨간 테두리, 놓으면 입력 오류로 실행이 막힌다
+    cathode = _handle(window, "cathode", 1)
+    cathode.setPos(QPointF(22.9, cathode.pos().y()), finish=False)
+    assert cathode.pen.color().name() == "#d03b3b"
+    cathode.sigRegionChangeFinished.emit(cathode)
+    qtbot.waitUntil(lambda: not window.run_button.isEnabled(), timeout=3000)
+    assert "겹칩니다" in window.messages.text()
+    assert window.geometry.cathode2.x.value() == pytest.approx(23.05, abs=0.051)   # 1 mm 단위로 맞춤
+
+
+def test_real_mouse_drag_moves_anode(window, qtbot):
+    """실제 마우스 이벤트(누르기 → 끌기 → 놓기)로 측면도의 양극을 옮긴다."""
+    from PyQt6.QtCore import QPoint
+    from PyQt6.QtTest import QTest
+
+    side = window.side_view
+    qtbot.wait(100)                                                         # 측면도 범위 맞춤이 끝난 뒤
+    anode = _handle(window, "anode")
+    centre = QPointF(anode.pos().x() + 0.1, anode.pos().y() + 7.5)          # 판 가운데 [cm]
+    start = side.mapFromScene(side.getPlotItem().vb.mapViewToScene(centre))
+    viewport = side.viewport()
+    QTest.mouseMove(viewport, start)
+    qtbot.wait(20)                                                          # 마우스 올림(hover) 처리
+    QTest.mousePress(viewport, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+    for k in range(1, 21):
+        QTest.mouseMove(viewport, start + QPoint(4 * k, 0))
+        qtbot.wait(5)
+    QTest.mouseRelease(viewport, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start + QPoint(80, 0))
+    qtbot.waitUntil(lambda: window.geometry.anode.x.value() > 22.0, timeout=3000)
+    assert window.geometry.anode.z.value() == pytest.approx(8.0)          # 가로로만 끌었다
+
+
+def test_electrodes_locked_while_running(window, qtbot):
+    window.process.duration.setValue(30.0)
+    window.speed.setCurrentIndex(window.speed.findData(60.0))   # 천천히 → 실행 중 상태를 확인
+    window.run_button.click()
+    assert not _handle(window, "anode").translatable
+    window.stop_simulation()
+    qtbot.waitUntil(lambda: window._thread is None, timeout=30000)
+    assert _handle(window, "anode").translatable
 
 
 def test_worker_paces_and_offers_latest_snapshot(qtbot):
