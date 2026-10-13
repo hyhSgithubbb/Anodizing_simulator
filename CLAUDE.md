@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Al/Ti anodizing simulator: predicts Al₂O₃ / TiO₂ oxide thickness over time from voltage, current, electrolyte recipe, cathode material and electrode layout. Python + PyQt6 + PyQtGraph (+ NumPy, SciPy, PyOpenGL). UI text, docstrings and comments are in Korean — keep that convention. Pure metals only (Al 1xxx, CP Ti); alloys are out of scope by decision.
 
-`docs/DESIGN.md` is the source of truth for the math model, verification results and roadmap (P0–P1 done; P2 = per-position thickness h(s,t) via L1 resistance matrix). Update it when the model or architecture changes.
+`docs/DESIGN.md` is the source of truth for the math model, verification results and roadmap (P0–P2 done; P3 = L2 FDM Laplace resistance matrix + drag-to-place electrodes). Update it when the model or architecture changes.
 
 ## Commands
 
@@ -12,7 +12,7 @@ Al/Ti anodizing simulator: predicts Al₂O₃ / TiO₂ oxide thickness over time
 pip install -r requirements-dev.txt && pip install -e .   # src/ layout — editable install required
 python -m anodsim                                          # GUI
 python -m anodsim.cli --list                               # list presets
-python -m anodsim.cli --metal Al --mode CCCV --voltage 15 --current 5 --minutes 60 [--csv out.csv]
+python -m anodsim.cli --metal Al --mode CCCV --voltage 15 --current 5 --minutes 60 [--csv out.csv] [--profile-csv p.csv] [--fidelity L0|L1]
 pytest                                                     # all tests (GUI tests use Qt offscreen if no DISPLAY)
 pytest tests/test_simulator.py::test_720_rule              # single test
 ruff check src tests --select F,E9,B,UP --target-version py311 --line-length 120
@@ -28,13 +28,16 @@ Headless GUI screenshots/checks: run under `xvfb-run -a -s "-screen 0 1600x1000x
 
 Simulation pipeline (spans several files):
 1. `ProcessConfig` (frozen, `core/state.py`) → `Simulator` (`core/simulator.py`) resolves presets into `ElectrolyteProps` at bath temperature/concentration and builds a `GrowthModel` (`core/growth/`: `CompactGrowth` or `PorousGrowth` by preset `regime`).
-2. Everything is written as length-N arrays over anode surface elements with an N×N electrolyte resistance matrix `R`. Currently L0: N=1, `R` from `Geometry.lumped_resistance` (side-view geometry: x horizontal, z height, y depth). L1/L2 will only change how `R` and areas are built.
+2. Everything is written as length-N arrays over anode surface elements with an N×N electrolyte resistance matrix `R`. `core/field/build_field(geometry, fidelity)` is the only place that differs per fidelity: L0 → one element, `R` from `Geometry.lumped_resistance`; L1 → `SurfaceMesh` along the side-view (x–z) perimeter of the immersed anode (−x face ↓, bottom, +x face ↑, top if fully immersed; y-end faces folded into ±x elements so Σa = wetted area) and diagonal `R_ii = L_eff/(κ a_i)` from shortest paths that wrap around the plate and never cross the liquid surface (`path_model.py`). L2 (P3) should plug in at the same spot with a dense `R`; `CircuitSolver` already handles general N×N. Geometry coords: x horizontal, z height, y depth.
 3. `CircuitSolver` (`core/circuit.py`) finds the operating point each step: Newton in x = ln j over the voltage balance U_app = U_off + U_f(j,δ_b) + R·I + R_ext·I + |η_c|. The rectifier runs at whichever of voltage/current limit binds first (CV/CC/CCCV differ only in which value is the setpoint and where the ramp applies). `barrier_sensitivity` gives dj/dδ_b and dU_f/dδ_b by implicit differentiation.
 4. Time integration: the barrier ODE is very stiff (high-field law, relaxation ~0.1 s), so δ_b uses a **linearly implicit Euler** step with Jacobian from `barrier_sensitivity` × `GrowthModel.barrier_rate_partials`. Charge, porous layer and metal loss are advanced with the same linearized current `j_lin`, which makes charge conservation exact — keep this invariant if you touch `Simulator.step` (tests check it to 1e-9). Explicit schemes oscillated at steady state; don't revert to them.
 5. Porous model charge partition: only current above the steady-state j_ss(U_f) thickens the barrier; the rest grows pores (`GrowthModel.pore_formation`). The porous layer has no electrical resistance, so it never feeds back into the circuit.
 6. `core/limits.py` raises flags (breakdown, burning, dissolution limit, CC operation) and config range / cathode-compatibility warnings.
+7. `SimulationResult`: scalar series are area-weighted means (+ `total_min/max`); per-element history is subsampled (~400 times) into `profile_time/profile_total/profile_current_density`; plus `mesh`, `wagner`, `uniformity`.
 
-GUI: `MainWindow` wires input panels (`gui/panels/`) → builds/validates `ProcessConfig` on every change → updates `SideView` (default 2D) and `Geometry3DView` (pyqtgraph.opengl; left-drag orbit, right-drag pan; labels are QLabels positioned by projecting 3D points because GL text doesn't render reliably). Runs execute in `SimulationWorker` on a `QThread`; results go to `ResultsView` (4 stacked plots sharing a time axis, single y-axis each).
+`anodsim/__init__.py` forces single-threaded BLAS (setdefault) before numpy loads — multithreaded OpenBLAS on these small systems burned all cores and made GUI runs 3× slower. Don't remove it.
+
+GUI: `MainWindow` wires input panels (`gui/panels/`) → builds/validates `ProcessConfig` on every change → updates `SideView` (default 2D) and `Geometry3DView` (pyqtgraph.opengl; left-drag orbit, right-drag pan; labels are QLabels positioned by projecting 3D points because GL text doesn't render reliably). Runs execute in `SimulationWorker` on a `QThread` with a speed multiplier. Live updates are **pull-based**: the worker only swaps a reference to the latest immutable `Snapshot`; a `QTimer` in `MainWindow` calls `take_snapshot()` (33 ms, 100 ms at max speed). Don't go back to emitting a signal per snapshot — slow painting flooded the event queue and starved timers/input for seconds. `ResultsView` has tabs [시간 이력 | 위치별 분포] (profiles h(s), j(s) + heatmap); `SideView` draws per-face `ImageItem` colour strips and `Geometry3DView` a per-element coloured mesh (`gui/views/colormap.py`: viridis for thickness, CET-D1 for deviation). Painting is skipped when the result's geometry no longer matches the current inputs.
 
 ## Testing notes
 

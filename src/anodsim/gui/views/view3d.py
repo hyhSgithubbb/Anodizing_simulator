@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidg
 from ...core import units as u
 from ...core.geometry import Geometry
 from .. import style
+from .colormap import ColorLegend, colors
 
 try:  # PyOpenGL 미설치 시에도 나머지 GUI 는 동작해야 한다
     import pyqtgraph.opengl as gl
@@ -54,6 +55,35 @@ def box_edges(x0, x1, y0, y1, z0, z1, top=True):
     if top:
         pairs += [(4, 5), (5, 6), (6, 7), (7, 4)]
     return np.array([c[i] for pair in pairs for i in pair])
+
+
+def anode_surface_quads(mesh, box, eps: float = 0.0):
+    """양극 표면 요소를 3D 사각형으로 (SI 단위, box 는 PlateElectrode.box 결과).
+
+    돌려주는 값: (꼭짓점 (Q, 4, 3), 각 사각형이 속한 요소 번호 (Q,)).
+    −x/+x 면 요소는 같은 높이 구간의 y 끝면 절반(두께 방향 반쪽)도 함께 칠한다 (요소 면적 정의와 같음).
+    eps 만큼 바깥으로 띄워 판 메시와 겹쳐 깜빡이지 않게 한다.
+    """
+    x0, x1, y0, y1 = box.x0, box.x1, box.y0, box.y1
+    z0, z1 = box.z0, box.z1
+    xm = 0.5 * (x0 + x1)
+    quads, owner = [], []
+    for i in range(mesh.size):
+        f, c, half = int(mesh.face[i]), (mesh.x[i], mesh.z[i]), 0.5 * mesh.length[i]
+        if f in (0, 2):
+            za, zb = c[1] - half, c[1] + half
+            xf = x0 - eps if f == 0 else x1 + eps
+            xa, xb = (x0, xm) if f == 0 else (xm, x1)
+            quads.append([[xf, y0, za], [xf, y1, za], [xf, y1, zb], [xf, y0, zb]])
+            quads.append([[xa, y0 - eps, za], [xb, y0 - eps, za], [xb, y0 - eps, zb], [xa, y0 - eps, zb]])
+            quads.append([[xa, y1 + eps, za], [xb, y1 + eps, za], [xb, y1 + eps, zb], [xa, y1 + eps, zb]])
+            owner += [i, i, i]
+        else:
+            xa, xb = c[0] - half, c[0] + half
+            zf = z0 - eps if f == 1 else z1 + eps
+            quads.append([[xa, y0, zf], [xb, y0, zf], [xb, y1, zf], [xa, y1, zf]])
+            owner.append(i)
+    return np.array(quads, dtype=float).reshape(-1, 4, 3), np.array(owner, dtype=int)
 
 
 if gl is not None:
@@ -143,6 +173,10 @@ class Geometry3DView(QWidget):
         self.view = OrbitView()
         self.view.setBackgroundColor(QColor("#f4f4f1"))
         layout.addWidget(self.view, 1)
+        self.legend = ColorLegend(parent=self.view)
+        self._surface = None
+        self._surface_owner = None
+        self._surface_size = 0
 
     def set_metal(self, metal: str) -> None:
         self._metal = metal
@@ -154,9 +188,45 @@ class Geometry3DView(QWidget):
         self._geometry = g
         for item in list(self.view.items):
             self.view.removeItem(item)
+        self._surface = None          # 형상이 바뀌면 이전 계산의 두께 색은 지운다
+        self.legend.hide()
         self._build_scene(g)
         if first:
             self.set_view(*VIEW_PRESETS[0][1:])
+
+    def set_profile(self, mesh, values, vmin: float, vmax: float, label: str) -> None:
+        """양극 표면을 요소별 값(두께)으로 색칠한다. 같은 요소 구성이면 색만 바꾼다 (실시간 갱신)."""
+        if self.view is None or self._geometry is None or mesh.size < 2:
+            return
+        if self._surface is None or self._surface_size != mesh.size:
+            self._build_surface(mesh)
+        face_colors = np.repeat(colors(values, vmin, vmax)[self._surface_owner], 2, axis=0)  # 사각형 = 삼각형 2개
+        self._surface_data.setFaceColors(face_colors)
+        self._surface.meshDataChanged()
+        self.legend.set_range(vmin, vmax, label)
+        self._place_legend()
+
+    def _build_surface(self, mesh):
+        box = self._geometry.anode.box(self._geometry.tank)
+        quads, owner = anode_surface_quads(mesh, box, eps=0.3 * u.MM)
+        vertexes = quads.reshape(-1, 3) / u.CM
+        base = 4 * np.arange(quads.shape[0])[:, np.newaxis]
+        faces = np.vstack([base + [0, 1, 2], base + [0, 2, 3]])
+        faces = faces.reshape(2, -1, 3).transpose(1, 0, 2).reshape(-1, 3)   # 사각형마다 삼각형 2개 연속
+        self._surface_data = gl.MeshData(vertexes=vertexes, faces=faces)
+        self._surface = gl.GLMeshItem(meshdata=self._surface_data, smooth=False, shader=None, glOptions="opaque")
+        self._surface.setDepthValue(-1)   # 반투명 전해질보다 먼저 그려야 가려지지 않는다
+        self.view.addItem(self._surface)
+        self._surface_owner = owner
+        self._surface_size = mesh.size
+
+    def _place_legend(self) -> None:
+        self.legend.move(12, self.view.height() - self.legend.height() - 12)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if getattr(self, "view", None) is not None:
+            self._place_legend()
 
     def set_view(self, elevation: float, azimuth: float) -> None:
         if self.view is None or self._geometry is None:

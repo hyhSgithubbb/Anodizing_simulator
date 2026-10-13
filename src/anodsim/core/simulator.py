@@ -13,24 +13,27 @@
 
 스텝 크기는 배리어 두께 상대 변화(0.5 %), 전류 상대 변화(5 %), 램프 해상도로 제한한다.
 
-현재는 L0(양극 전체를 한 요소로 보는 0D 모델)만 지원한다. 요소 수 N 과 저항 행렬 R 만
-바꾸면 L1/L2 로 확장되도록 모든 계산은 길이 N 배열로 되어 있다.
+모든 계산은 양극 표면 요소에 대한 길이 N 배열이다. 해석 단계(L0: N = 1, L1: 측면도 둘레 N 요소)는
+`core.field` 가 만드는 요소 면적과 저항 행렬 R 만 바꾼다.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
 
 from . import limits
 from .circuit import CircuitSolver
+from .field import Field, SurfaceMesh, build_field
 from .growth import GrowthRates, make_growth_model
 from .power_supply import PowerSupply
 from .presets import PresetDB
 from .state import ProcessConfig, SimState, Snapshot
 
 MIN_STEP = 1e-9  # s
+PROFILE_SAMPLES = 400   # 위치별 이력 h(s, t) 를 기록하는 최대 시각 수 (대략)
 
 
 class ConfigError(ValueError):
@@ -41,7 +44,11 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True)
 class SimulationResult:
-    """시간 이력 (표면 요소에 대해서는 면적 가중 평균, 두께는 최소/최대도 기록)."""
+    """시간 이력.
+
+    스칼라 시계열은 매 스텝 기록하며, 표면 요소에 대해서는 면적 가중 평균이다 (두께는 최소/최대도 기록).
+    위치별 이력 profile_* 은 대략 PROFILE_SAMPLES 개 시각에서 요소별 값을 기록한다 (행 = 시각, 열 = 요소).
+    """
 
     time: np.ndarray                    # s
     voltage: np.ndarray                 # V
@@ -60,19 +67,36 @@ class SimulationResult:
     flags: frozenset[str]
     warnings: tuple[str, ...]
     steps: int
+    mesh: SurfaceMesh
+    profile_time: np.ndarray            # s, (K,)
+    profile_total: np.ndarray           # m, (K, N)
+    profile_current_density: np.ndarray  # A/m², (K, N)
+    wagner: float                       # 최종 시각의 면적 가중 Wagner 수 (전류 0 이면 nan)
+
+    @property
+    def uniformity(self) -> float:
+        """최종 두께 편차 (최대 − 최소)/평균. 요소 1개이면 0."""
+        h = self.final.total
+        mean = float(self.mesh.area @ h / self.mesh.area.sum())
+        return float((h.max() - h.min()) / mean) if mean > 0 else 0.0
 
 
 class _History:
     _FIELDS = ("time", "voltage", "current", "control", "current_density", "film_voltage",
                "cathode_overpotential", "barrier", "porous", "total", "total_min", "total_max", "charge")
 
-    def __init__(self, areas: np.ndarray):
+    def __init__(self, areas: np.ndarray, duration: float):
         self.weights = areas / areas.sum()
         self.rows = {name: [] for name in self._FIELDS}
+        self.profile_interval = duration / PROFILE_SAMPLES
+        self.profile = {"time": [], "total": [], "current_density": []}
 
-    def add(self, s: Snapshot) -> None:
+    def add(self, s: Snapshot, force_profile: bool = False) -> None:
         w = self.weights
         r = self.rows
+        p = self.profile
+        if force_profile or not p["time"] or s.time - p["time"][-1] >= self.profile_interval:
+            self.add_profile(s)
         r["time"].append(s.time)
         r["voltage"].append(s.voltage)
         r["current"].append(s.current)
@@ -87,10 +111,22 @@ class _History:
         r["total_max"].append(float(s.total.max()))
         r["charge"].append(float(w @ s.charge))
 
-    def result(self, final: Snapshot, flags, warnings, steps: int) -> SimulationResult:
+    def result(self, final: Snapshot, flags, warnings, steps: int, mesh: SurfaceMesh,
+               wagner: float) -> SimulationResult:
+        if self.profile["time"][-1] != final.time:   # 마지막 시각은 항상 기록
+            self.add_profile(final)
         arrays = {k: np.asarray(v, dtype=float) for k, v in self.rows.items() if k != "control"}
+        p = self.profile
         return SimulationResult(control=tuple(self.rows["control"]), final=final, flags=frozenset(flags),
-                                warnings=tuple(warnings), steps=steps, **arrays)
+                                warnings=tuple(warnings), steps=steps, mesh=mesh, wagner=wagner,
+                                profile_time=np.asarray(p["time"], dtype=float),
+                                profile_total=np.vstack(p["total"]),
+                                profile_current_density=np.vstack(p["current_density"]), **arrays)
+
+    def add_profile(self, s: Snapshot) -> None:
+        self.profile["time"].append(s.time)
+        self.profile["total"].append(s.total)
+        self.profile["current_density"].append(s.current_density)
 
 
 class Simulator:
@@ -110,8 +146,10 @@ class Simulator:
         self.supply = PowerSupply(config.power)
 
         geo = config.geometry
-        self.areas = np.array([geo.anode_area])                                        # L0: 요소 1개
-        self.resistance = np.array([[geo.lumped_resistance(self.props.conductivity)]])  # Ω
+        self.field: Field = build_field(geo, config.fidelity, config.elements)
+        self.mesh = self.field.mesh
+        self.areas = self.mesh.area                                       # m², (N,)
+        self.resistance = self.field.resistance(self.props.conductivity)  # Ω, (N, N)
         self.circuit = CircuitSolver(self.areas, self.resistance, self.cathode, geo.cathode_area,
                                      config.offset_voltage, config.external_resistance)
         self.warnings = tuple(limits.range_warnings(config, self.preset, self.cathode))
@@ -183,14 +221,28 @@ class Simulator:
 
     def run(self, callback=None) -> SimulationResult:
         """끝까지 적분한다. callback(snapshot) 이 False 를 돌려주면 중단한다."""
-        history = _History(self.areas)
+        history = _History(self.areas, self.config.duration)
         history.add(self.snapshot())
         while not self.done:
             snap = self.step()
             history.add(snap)
             if callback is not None and callback(snap) is False:
                 break
-        return history.result(self.snapshot(), self.flags_seen, self.warnings, self.steps)
+        return history.result(self.snapshot(), self.flags_seen, self.warnings, self.steps, self.mesh,
+                              self.wagner_number())
+
+    def wagner_number(self) -> float:
+        """면적 가중 Wagner 수 Wa = (dU_f/dj) / (R_ii·a_i) — 막 분극 저항 / 전해질 저항.
+
+        Wa ≫ 1 이면 막이 분포를 지배해 균일하고, Wa ≪ 1 이면 형상(전해질 저항)이 지배해 편차가 크다.
+        """
+        op, s = self._op, self.state
+        j = op.current_density
+        if op.control == "OFF" or not np.all(j > 0):
+            return math.nan
+        polarization = self.model.d_film_voltage_d_lnj(j, s.barrier) / j          # Ω·m²
+        electrolyte = np.diag(self.resistance) * self.areas                      # Ω·m²
+        return float(self.areas @ (polarization / electrolyte) / self.areas.sum())
 
     # ── 내부 ────────────────────────────────────────────────────────────────
     def _set_operating_point(self, op) -> None:

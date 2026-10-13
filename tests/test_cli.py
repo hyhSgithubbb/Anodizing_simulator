@@ -19,3 +19,14 @@ def test_run_and_csv(tmp_path, capsys):
 def test_invalid_config_returns_error(capsys):
     assert cli.main(["--metal", "Ti", "--electrolyte", "al_oxalic", "--mode", "CV", "--voltage", "40"]) == 2
     assert "설정 오류" in capsys.readouterr().err
+
+
+def test_l1_profile_csv(tmp_path, capsys):
+    out = tmp_path / "profile.csv"
+    assert cli.main(["--metal", "Ti", "--electrolyte", "ti_nanotube_eg", "--mode", "CV", "--voltage", "60",
+                     "--minutes", "2", "--one-cathode", "--profile-csv", str(out)]) == 0
+    text = capsys.readouterr().out
+    assert "해석 L1" in text and "편차" in text
+    rows = list(csv.DictReader(out.open(encoding="utf-8")))
+    assert len(rows) > 100
+    assert {r["face"] for r in rows} == {"−x 면", "바닥", "+x 면", "윗면"}

@@ -67,7 +67,7 @@ def test_default_geometry_is_valid():
     g = Geometry.default()
     assert g.validate() == []
     a = g.anode
-    expected = 2 * a.height * a.width + 2 * a.height * a.thickness + a.thickness * a.width
+    expected = 2 * a.height * a.width + 2 * a.height * a.thickness + 2 * a.thickness * a.width   # 완전히 잠김: 윗면 포함
     assert g.anode_area == pytest.approx(expected)
 
 
@@ -76,6 +76,8 @@ def test_partially_immersed_electrode():
     assert plate.immersed_height(0.3) == pytest.approx(0.1)
     assert plate.immersed_height(0.1) == 0.0
     assert plate.wetted_area(0.1) == 0.0
+    assert not plate.fully_immersed(0.3)
+    assert plate.wetted_area(0.3) == pytest.approx(2 * 0.1 * 0.1 + 2 * 0.1 * 0.002 + 0.002 * 0.1)   # 윗면 제외
 
 
 @pytest.mark.parametrize("change, message", [

@@ -1,5 +1,9 @@
 """GUI 스모크 테스트 (pytest-qt). 디스플레이가 없으면 offscreen 플랫폼으로 실행된다."""
 
+import math
+import time
+from dataclasses import replace
+
 import pytest
 
 pytest.importorskip("pytestqt")
@@ -9,8 +13,12 @@ from PyQt6.QtGui import QMouseEvent
 from PyQt6.QtWidgets import QApplication
 
 from anodsim.core.power_supply import PowerMode
+from anodsim.core.simulator import Simulator
 from anodsim.gui.app import configure_pyqtgraph
 from anodsim.gui.main_window import MainWindow
+from anodsim.gui.worker import SimulationWorker
+
+from conftest import make_config
 
 
 @pytest.fixture
@@ -52,13 +60,61 @@ def test_invalid_geometry_blocks_run(window):
 
 
 def test_run_simulation_end_to_end(window, qtbot):
+    assert window.process.fidelity_level() == "L1"          # 위치별 두께가 기본
     window.process.mode.setCurrentIndex(window.process.mode.findData(PowerMode.CV))
     window.process.duration.setValue(3.0)
     window.run_button.click()
     qtbot.waitUntil(lambda: window._thread is None, timeout=30000)
+    result = window.results._result
     assert window.results.thickness.curves
-    assert window.results._result.time[-1] == pytest.approx(180.0)
+    assert result.time[-1] == pytest.approx(180.0)
+    assert result.mesh.size > 100
     assert "최종" in window.results.readout.text()
+    # 위치별 분포 탭, 측면도 색 띠, 3D 표면 색칠
+    assert window.results.tabs.isTabEnabled(1)
+    window.results.tabs.setCurrentIndex(1)
+    assert window.results.profile_h.curve.getData()[0].size == result.mesh.size
+    assert window.results.heatmap.image.image is not None
+    assert len(window.side_view._strips) == len(result.mesh.faces)
+    assert window.side_view.legend.isVisible()
+    if window.view3d.view is not None:
+        assert window.view3d._surface is not None
+    # 형상을 바꾸면 이전 결과의 색은 지운다
+    window.geometry.anode.z.setValue(9.0)
+    assert not window.side_view._strips
+
+
+def test_l0_run_disables_distribution_tab(window, qtbot):
+    window.process.fidelity.setCurrentIndex(window.process.fidelity.findData("L0"))
+    window.process.duration.setValue(2.0)
+    window.run_button.click()
+    qtbot.waitUntil(lambda: window._thread is None, timeout=30000)
+    assert window.results._result.mesh.size == 1
+    assert not window.results.tabs.isTabEnabled(1)
+    assert not window.side_view._strips
+
+
+def test_worker_paces_and_offers_latest_snapshot(qtbot):
+    sim = Simulator(replace(make_config(minutes=2.0), fidelity="L1"))
+    worker = SimulationWorker(sim, speed=600.0)              # 공정 120 s → 실제 0.2 s 이상
+    assert worker.take_snapshot() is None
+    done = []
+    worker.finished.connect(lambda result, stopped: done.append((result, stopped)))
+    start = time.monotonic()
+    worker.run()
+    assert time.monotonic() - start >= 0.18
+    assert done and not done[0][1]
+    snap = worker.take_snapshot()
+    assert snap is not None and snap.time == pytest.approx(120.0) and snap.total.size == sim.mesh.size
+    assert worker.take_snapshot() is None                    # 같은 스냅샷은 한 번만
+    assert worker.progress == pytest.approx(1.0)
+
+    fast = SimulationWorker(Simulator(replace(make_config(minutes=2.0), fidelity="L1")), speed=math.inf)
+    fast.request_stop()
+    stopped = []
+    fast.finished.connect(lambda result, was_stopped: stopped.append(was_stopped))
+    fast.run()
+    assert stopped == [True]
 
 
 def test_3d_view_rotates_with_mouse_drag(window, qtbot):

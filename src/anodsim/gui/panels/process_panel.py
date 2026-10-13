@@ -1,4 +1,4 @@
-"""공정 조건: 금속, 전원 모드, 전압·전류, 램프, 공정 시간, 욕 온도."""
+"""공정 조건: 금속, 전원 모드, 전압·전류, 램프, 공정 시간, 욕 온도, 해석 단계."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import QCheckBox, QComboBox, QFormLayout, QHBoxLayout, QWidget
 
 from ...core import units as u
+from ...core.field import FIDELITY_LEVELS
 from ...core.power_supply import PowerMode, PowerSetting
 from .widgets import hint, spin
 
@@ -45,6 +46,10 @@ class ProcessPanel(QWidget):
         self.ramp = spin(30.0, 0.0, 3600.0, decimals=0, step=5.0, suffix="s")
         self.duration = spin(60.0, 0.1, 1440.0, decimals=1, step=5.0, suffix="min")
         self.temperature = spin(20.0, -20.0, 100.0, decimals=1, step=0.5, suffix="°C")
+        self.fidelity = QComboBox()
+        for level, label in FIDELITY_LEVELS.items():
+            self.fidelity.addItem(label, level)
+        self.fidelity.setCurrentIndex(self.fidelity.findData("L1"))
 
         form = QFormLayout(self)
         form.addRow("금속", self.metal)
@@ -55,6 +60,7 @@ class ProcessPanel(QWidget):
         form.addRow("램프 (소프트 스타트)", self.ramp)
         form.addRow("공정 시간", self.duration)
         form.addRow("욕 온도", self.temperature)
+        form.addRow("해석 단계", self.fidelity)
         self.mode_hint = hint()
         form.addRow(self.mode_hint)
         self._form = form
@@ -62,6 +68,7 @@ class ProcessPanel(QWidget):
         self.metal.currentIndexChanged.connect(lambda _: self.metal_changed.emit(self.metal_symbol()))
         self.metal.currentIndexChanged.connect(lambda _: self.changed.emit())
         self.mode.currentIndexChanged.connect(self._update_mode)
+        self.fidelity.currentIndexChanged.connect(lambda _: self.changed.emit())
         self.unlimited.toggled.connect(self._update_mode)
         for box in (self.voltage, self.current, self.ramp, self.duration, self.temperature):
             box.valueChanged.connect(self._on_value)
@@ -78,6 +85,9 @@ class ProcessPanel(QWidget):
         mode = self.power_mode()
         current = math.inf if (mode is PowerMode.CV and self.unlimited.isChecked()) else self.current.value()
         return PowerSetting(mode, self.voltage.value(), current, self.ramp.value())
+
+    def fidelity_level(self) -> str:
+        return self.fidelity.currentData()
 
     def duration_s(self) -> float:
         return self.duration.value() * u.MINUTE

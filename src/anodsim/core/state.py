@@ -10,7 +10,8 @@ import numpy as np
 from .geometry import Geometry
 from .power_supply import PowerSetting
 
-SUPPORTED_FIDELITY = ("L0",)
+SUPPORTED_FIDELITY = ("L0", "L1")
+MAX_ELEMENTS = 400
 
 
 @dataclass(frozen=True)
@@ -28,7 +29,8 @@ class ProcessConfig:
     geometry: Geometry
     bath_temperature: float          # K
     duration: float                  # s
-    fidelity: str = "L0"
+    fidelity: str = "L0"             # "L0" (0D) | "L1" (위치별, 경로 저항 근사)
+    elements: int = 120              # L1 표면 요소 수 (목표값)
     offset_voltage: float = 0.0      # V — 가역 셀 전압 + 접점 전압 (묶음)
     external_resistance: float = 0.0  # Ω — 버스바·케이블
 
@@ -40,6 +42,8 @@ class ProcessConfig:
             errors.append("욕 온도가 물리적으로 가능한 범위를 벗어났습니다.")
         if self.fidelity not in SUPPORTED_FIDELITY:
             errors.append(f"지원하지 않는 해석 단계: {self.fidelity} (현재 {', '.join(SUPPORTED_FIDELITY)} 만 지원)")
+        if self.fidelity != "L0" and not 2 <= self.elements <= MAX_ELEMENTS:
+            errors.append(f"표면 요소 수는 2–{MAX_ELEMENTS} 사이여야 합니다.")
         if self.external_resistance < 0:
             errors.append("외부 저항은 0 이상이어야 합니다.")
         errors += self.power.validate()
@@ -60,7 +64,7 @@ class ProcessConfig:
 
 @dataclass
 class SimState:
-    """표면 요소별 상태 (L0 에서는 요소 1개)."""
+    """표면 요소별 상태 (길이 N 배열, L0 에서는 요소 1개)."""
 
     time: float
     barrier: np.ndarray       # δ_b [m]

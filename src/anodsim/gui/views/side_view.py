@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QBrush, QColor, QPen
@@ -10,6 +11,10 @@ from PyQt6.QtWidgets import QGraphicsRectItem
 from ...core import units as u
 from ...core.geometry import Geometry
 from .. import style
+from .colormap import THICKNESS_CMAP, ColorLegend
+
+_STRIP_GAP = 0.05     # cm — 양극 표면과 색 띠 사이 간격
+_STRIP_WIDTH = 0.35   # cm — 색 띠 두께
 
 
 def _pen(color, width=1.5, style_=Qt.PenStyle.SolidLine) -> QPen:
@@ -39,6 +44,10 @@ class SideView(pg.PlotWidget):
         self.setTitle("측면도 (x–z 단면, 화면 안쪽이 깊이 y)", color=style.INK_SECONDARY, size="10pt")
         self._items = []
         self._metal = "Al"
+        self._strips: list[tuple[pg.ImageItem, np.ndarray]] = []   # 면마다 색 띠 (이미지, 요소 번호)
+        self._strip_mesh = None
+        self._lut = THICKNESS_CMAP.getLookupTable(nPts=256)
+        self.legend = ColorLegend(parent=self)
 
     def set_metal(self, metal: str) -> None:
         self._metal = metal
@@ -47,6 +56,7 @@ class SideView(pg.PlotWidget):
         for item in self._items:
             self.removeItem(item)
         self._items.clear()
+        self.clear_profile()   # 형상이 바뀌면 이전 계산의 두께 색은 의미가 없다
         t = g.tank
         w, h, level = t.width / u.CM, t.height / u.CM, t.liquid_level / u.CM
 
@@ -69,6 +79,58 @@ class SideView(pg.PlotWidget):
         self._bounds = (-pad, w + pad, -pad, bus_z + 6.0)
         self._fit()
 
+    def set_profile(self, mesh, values, vmin: float, vmax: float, label: str) -> None:
+        """양극 둘레 바깥에 요소별 값(두께)을 색 띠로 표시한다 (요소 2개 이상일 때).
+
+        면마다 이미지 한 장(1 × 요소 수)이라 실시간 갱신에도 가볍다.
+        """
+        if mesh.size < 2:
+            self.clear_profile()
+            return
+        if self._strip_mesh is not mesh:
+            self._build_strips(mesh)
+        values = np.asarray(values, dtype=float)
+        for item, index in self._strips:
+            item.setImage(values[index], levels=(vmin, vmax), lut=self._lut, autoLevels=False)
+        self.legend.set_range(vmin, vmax, label)
+        self._place_legend()
+
+    def clear_profile(self) -> None:
+        for item, _ in self._strips:
+            self.removeItem(item)
+        self._strips.clear()
+        self._strip_mesh = None
+        self.legend.hide()
+
+    def _build_strips(self, mesh) -> None:
+        self.clear_profile()
+        self._strip_mesh = mesh
+        x0, x1 = mesh.x.min() / u.CM, mesh.x.max() / u.CM
+        for face in mesh.faces:
+            index = np.flatnonzero(mesh.face == face)
+            span = mesh.length[index].sum() / u.CM
+            if face in (0, 2):          # 세로 띠: 행 0 = 가장 낮은 z
+                z = mesh.z[index] / u.CM
+                index = index[np.argsort(z)]
+                x = x0 - _STRIP_GAP - _STRIP_WIDTH if face == 0 else x1 + _STRIP_GAP
+                rect = QRectF(x, z.min() - 0.5 * span / index.size, _STRIP_WIDTH, span)
+                shape = (index.size, 1)
+            else:                       # 가로 띠: 열 0 = 가장 작은 x
+                x = mesh.x[index] / u.CM
+                index = index[np.argsort(x)]
+                zf = mesh.z[index[0]] / u.CM
+                z = zf - _STRIP_GAP - _STRIP_WIDTH if face == 1 else zf + _STRIP_GAP
+                rect = QRectF(x.min() - 0.5 * span / index.size, z, span, _STRIP_WIDTH)
+                shape = (1, index.size)
+            item = pg.ImageItem(np.zeros(shape), axisOrder="row-major")
+            item.setZValue(10)
+            item.setRect(rect)
+            self.addItem(item)
+            self._strips.append((item, index.reshape(shape)))
+
+    def _place_legend(self) -> None:
+        self.legend.move(self.width() - self.legend.width() - 12, 34)
+
     def _fit(self) -> None:
         """비율 고정 상태에서 전해조 전체가 보이도록 범위를 맞춘다 (숨겨진 상태에서 그려졌을 때 대비)."""
         if self._bounds is not None:
@@ -78,6 +140,8 @@ class SideView(pg.PlotWidget):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._fit()
+        if self._bounds is not None:
+            self._place_legend()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)

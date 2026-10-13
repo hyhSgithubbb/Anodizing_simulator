@@ -66,13 +66,17 @@ class PlateElectrode:
         """잠긴 한쪽 넓은 면의 면적 [m²]."""
         return self.immersed_height(liquid_level) * self.width
 
+    def fully_immersed(self, liquid_level: float) -> bool:
+        """윗면까지 잠겼는가 (아니면 윗면 자리는 액면 = 절연 경계)."""
+        return self.z_top < liquid_level
+
     def wetted_area(self, liquid_level: float) -> float:
-        """전해질에 닿는 전체 면적 [m²] — 앞뒤 두 면 + 옆 모서리 + 바닥."""
+        """전해질에 닿는 전체 면적 [m²] — 앞뒤 두 면 + 옆 모서리 + 바닥 (+ 완전히 잠기면 윗면)."""
         h = self.immersed_height(liquid_level)
         if h <= 0.0:
             return 0.0
-        bottom = self.thickness * self.width if self.z_bottom < liquid_level else 0.0
-        return 2.0 * h * self.width + 2.0 * h * self.thickness + bottom
+        ends = (1.0 + float(self.fully_immersed(liquid_level))) * self.thickness * self.width
+        return 2.0 * h * self.width + 2.0 * h * self.thickness + ends
 
     def box(self, tank: Tank) -> Box:
         yc = 0.5 * tank.depth if self.y_center is None else self.y_center
